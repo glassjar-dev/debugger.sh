@@ -7,10 +7,6 @@ out
 .env*.local
 next-env.d.ts
 
-# Local Supabase
-supabase/.branches
-supabase/.temp
-
 # wrangler local state and secrets — never commit
 .wrangler
 .dev.vars
@@ -25,3 +21,4 @@ public/engine_bg.wasm
 public/assets/
 
 .env.production
+dist-worker

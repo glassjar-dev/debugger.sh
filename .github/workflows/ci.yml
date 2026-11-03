@@ -5,18 +5,24 @@ on:
   workflow_dispatch:
 
 jobs:
-  migrations:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: supabase/setup-cli@v1
+      - uses: actions/setup-node@v4
         with:
-          version: latest
+          node-version: 22
+          cache: npm
 
-      # Apply all migrations to a fresh local DB — fails the PR if SQL is broken.
-      - name: Start local DB and apply migrations
-        run: supabase db start
+      - run: npm ci
 
-      - name: List migrations
-        run: supabase migration list --local
+      # Generates cs106b/generated/*, which the app imports.
+      - run: npm run build:cs106b
+
+      - name: Typecheck app and Worker
+        run: npm run typecheck
+
+      # Bundles worker/index.ts without uploading; fails on bad bindings or imports.
+      - name: Bundle Worker
+        run: mkdir -p out && npx wrangler deploy --dry-run --outdir dist-worker

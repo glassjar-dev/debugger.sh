@@ -13,8 +13,13 @@ const nextConfig: NextConfig = {
   images: { unoptimized: true },
   // Keep the prebundled debugger-sh dist from being re-compiled oddly by Next.
   transpilePackages: ["debugger-sh"],
+  // Dev only (`next dev`); the static export has no rewrites. In production the
+  // Worker serves /api/* itself.
   async rewrites() {
-    return [{ source: "/:path+", destination: "/" }];
+    return [
+      { source: "/api/:path*", destination: "http://localhost:8787/api/:path*" },
+      { source: "/:path+", destination: "/" },
+    ];
   },
   async headers() {
     return [

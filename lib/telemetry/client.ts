@@ -1,7 +1,6 @@
 'use client';
 
 import type { DockState } from '@/components/dock/types';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 import {
   EDIT_MERGE_MS,
@@ -10,6 +9,7 @@ import {
   type EditAtom,
   type OpenEdit,
 } from './coalesce';
+import type { TelemetryEnvelope } from './events';
 import type { Language, TelemetryDetails, TelemetryEvent } from './types';
 
 const QUEUE_KEY = 'dbg.telemetry.queue';
@@ -18,14 +18,14 @@ const FLUSH_MS = 400;
 const LAYOUT_SETTLE_MS = 200;
 const IO_WINDOW_MS = 500;
 const MAX_QUEUE = 1000;
-const BATCH = 20;
+const BATCH = 100;
+const ENDPOINT = '/api/events';
+// The Worker rejects bodies over 1 MiB. Keepalive requests, used while the page is
+// hiding, are limited by the browser to 64 KiB in flight.
+const MAX_BODY_BYTES = 768 * 1024;
+const MAX_KEEPALIVE_BYTES = 60 * 1024;
 
-type QueuedEvent = {
-  session_id: string;
-  timestamp: string;
-  event: TelemetryEvent;
-  details: unknown;
-};
+type QueuedEvent = TelemetryEnvelope;
 
 type IoKind = 'stdout' | 'stderr';
 
@@ -116,27 +116,6 @@ function persist() {
   } catch {
     // Quota or private mode: keep the in-memory queue and retry the send.
   }
-}
-
-let db: SupabaseClient | null = null;
-
-function telemetryDb(): SupabaseClient | null {
-  if (db) return db;
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  if (!url || !key) return null;
-  db = createClient(url, key, {
-    global: {
-      // Do not read the inserted row back. Select is revoked on this table.
-      headers: { Prefer: 'return=minimal' },
-    },
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-      detectSessionInUrl: false,
-    },
-  });
-  return db;
 }
 
 function scheduleFlush(delay: number) {
@@ -305,13 +284,34 @@ function commitLayout() {
   enqueue('layout_changed', { layout: JSON.parse(key) as DockState });
 }
 
+/** Take events from the front of the queue until the batch would exceed `maxBytes`. */
+function takeBatch(maxBytes: number): QueuedEvent[] {
+  const batch: QueuedEvent[] = [];
+  let bytes = 2;
+  for (const event of queue) {
+    if (batch.length >= BATCH) break;
+    const size = new Blob([JSON.stringify(event)]).size + 1;
+    if (batch.length > 0 && bytes + size > maxBytes) break;
+    batch.push(event);
+    bytes += size;
+  }
+  return batch;
+}
+
 async function send(batch: QueuedEvent[]): Promise<'ok' | 'retry' | 'poison'> {
-  const supabase = telemetryDb();
-  if (!supabase) return 'retry';
   try {
-    const { error, status } = await supabase.from('telemetry').insert(batch);
-    if (!error) return 'ok';
-    if (status >= 400 && status < 500) return 'poison';
+    const body = JSON.stringify(batch);
+    const res = await fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      // Lets the request outlive the page when sent from `pagehide`.
+      keepalive: new Blob([body]).size <= MAX_KEEPALIVE_BYTES,
+    });
+    if (res.ok) return 'ok';
+    // 429 is the per-IP rate limit; the batch itself is fine.
+    if (res.status === 429) return 'retry';
+    if (res.status >= 400 && res.status < 500) return 'poison';
     return 'retry';
   } catch {
     return 'retry';
@@ -324,7 +324,7 @@ function takeRetry(): number {
   return wait;
 }
 
-async function flush(): Promise<void> {
+async function flush(maxBytes = MAX_BODY_BYTES): Promise<void> {
   if (typeof window === 'undefined') return;
   if (flushing) {
     flushAgain = true;
@@ -333,7 +333,7 @@ async function flush(): Promise<void> {
   ensureLoaded();
   if (queue.length === 0) return;
   flushing = true;
-  const batch = queue.slice(0, BATCH);
+  const batch = takeBatch(maxBytes);
   let retryDelay: number | null = null;
   try {
     const result = await send(batch);
@@ -378,7 +378,9 @@ async function flush(): Promise<void> {
 function onPageHide() {
   guard(() => {
     flushPendingBefore(Date.now());
-    void flush();
+    // Small enough for a keepalive request, so it survives the page closing. Anything
+    // left stays in localStorage and goes out on the next visit.
+    void flush(MAX_KEEPALIVE_BYTES);
   });
 }
 
