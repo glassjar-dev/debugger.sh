@@ -34,30 +34,31 @@ const LANG_EXTENSIONS: Record<Lang, () => Extension> = {
 // object is the single source of truth.
 
 const theme = {
-  bg: '#0d0d0d',
+  bg: '#0f1013', // --gj-panel, so the editor sits flush in its card
   fg: '#e5e7eb',
-  caret: '#f1f5f9',
-  selection: '#1e3a8a',
-  stoppedLine: 'rgba(251, 191, 36, 0.18)',
+  caret: '#7cc4ff',
+  selection: 'rgba(124, 196, 255, 0.22)',
+  activeLine: 'rgba(255, 255, 255, 0.025)',
+  stoppedLine: 'rgba(251, 191, 36, 0.14)',
+  stoppedEdge: '#fbbf24',
   gutter: {
-    bg: '#0a0a0a',
-    border: '1px solid #1a1a1a',
-    fg: '#666',
-    hoverBg: '#141414',
-    minWidth: 40, // px — tightens the gap between the breakpoint dot and number
+    bg: '#0f1013',
+    fg: '#4b515c',
+    activeFg: '#a6acb6',
+    minWidth: 44, // px — breakpoint dot on the left, number on the right
   },
   breakpoint: {
     dotSize: 10, // px
-    dotMargin: 6, // px (left)
-    fill: '#ef4444',
-    holeBorder: '1px solid #2a2a2a',
+    dotMargin: 8, // px (left)
+    fill: '#f87171',
+    glow: '0 0 8px rgba(248, 113, 113, 0.55)',
+    hover: 'rgba(248, 113, 113, 0.35)',
   },
   font: {
     family:
-      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+      'ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace',
     size: '13px',
-    // 1.54 ≈ 20px on a 13px font — matches the original textarea exactly.
-    lineHeight: '1.54',
+    lineHeight: '1.6',
   },
   // Tailwind 400-series — saturated enough to pop on a near-black background
   // while staying coherent with the rest of the IDE's palette.
@@ -88,21 +89,55 @@ const editorChrome = EditorView.theme(
     },
     // Strip CM defaults so vertical/horizontal rhythm matches the original
     // textarea (which had `padding: 0 12px`).
-    '.cm-content': { caretColor: theme.caret, padding: '0' },
-    '.cm-line': { padding: '0 12px' },
-    '.cm-cursor, .cm-dropCursor': { borderLeftColor: theme.caret },
-    '&.cm-focused .cm-selectionBackground, ::selection': {
+    '.cm-content': { caretColor: theme.caret, padding: '8px 0' },
+    '.cm-line': { padding: '0 14px' },
+    '.cm-cursor, .cm-dropCursor': { borderLeftColor: theme.caret, borderLeftWidth: '2px' },
+    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
       backgroundColor: theme.selection,
     },
+    '&.cm-focused': { outline: 'none' },
+    '.cm-activeLine': { backgroundColor: theme.activeLine },
     '.cm-gutters': {
       backgroundColor: theme.gutter.bg,
-      borderRight: theme.gutter.border,
+      border: 'none',
       color: theme.gutter.fg,
       cursor: 'pointer',
       userSelect: 'none',
+      paddingTop: '8px',
     },
-    '.cm-gutterElement:hover': { backgroundColor: theme.gutter.hoverBg },
-    '.cm-stopped-line': { backgroundColor: theme.stoppedLine },
+    '.cm-gutterElement.cm-activeLineGutter': { backgroundColor: 'transparent', color: theme.gutter.activeFg },
+    '.cm-gj-gutter': {
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      minWidth: `${theme.gutter.minWidth}px`,
+      paddingRight: '10px',
+      fontVariantNumeric: 'tabular-nums',
+    },
+    '.cm-gj-bp': {
+      flex: 'none',
+      marginLeft: `${theme.breakpoint.dotMargin}px`,
+      width: `${theme.breakpoint.dotSize}px`,
+      height: `${theme.breakpoint.dotSize}px`,
+      borderRadius: '50%',
+      background: 'transparent',
+      transition: 'background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease',
+    },
+    // Hovering a line number previews where the breakpoint would go.
+    '.cm-gutterElement:hover .cm-gj-bp': { background: theme.breakpoint.hover },
+    '.cm-gj-bp[data-on]': {
+      background: theme.breakpoint.fill,
+      boxShadow: theme.breakpoint.glow,
+    },
+    '.cm-gutterElement:hover .cm-gj-bp[data-on]': {
+      background: theme.breakpoint.fill,
+      transform: 'scale(0.85)',
+    },
+    '.cm-gj-gutter[data-bp] .cm-gj-num': { color: '#fca5a5' },
+    '.cm-stopped-line': {
+      backgroundColor: theme.stoppedLine,
+      boxShadow: `inset 3px 0 0 ${theme.stoppedEdge}`,
+    },
   },
   { dark: true },
 );
@@ -156,22 +191,16 @@ class LineGutterMarker extends GutterMarker {
 
   toDOM(): HTMLElement {
     const wrap = document.createElement('div');
-    wrap.style.cssText =
-      `display:flex;align-items:center;justify-content:space-between;` +
-      `min-width:${theme.gutter.minWidth}px;padding-right:8px;color:${theme.gutter.fg};`;
+    wrap.className = 'cm-gj-gutter';
+    if (this.hasBreakpoint) wrap.dataset.bp = '';
 
-    const { dotSize, dotMargin, fill, holeBorder } = theme.breakpoint;
     const dot = document.createElement('span');
-    dot.style.cssText =
-      `flex:none;display:inline-block;margin-left:${dotMargin}px;` +
-      `width:${dotSize}px;height:${dotSize}px;border-radius:50%;` +
-      (this.hasBreakpoint
-        ? `background:${fill};`
-        : `background:transparent;border:${holeBorder};`);
+    dot.className = 'cm-gj-bp';
+    if (this.hasBreakpoint) dot.dataset.on = '';
 
     const num = document.createElement('span');
+    num.className = 'cm-gj-num';
     num.textContent = String(this.lineNumber);
-    num.style.cssText = 'font-variant-numeric:tabular-nums;';
 
     wrap.append(dot, num);
     return wrap;
@@ -299,8 +328,8 @@ export default function CodeEditor(props: CodeEditorProps) {
         // We render our own combined breakpoint + line-number gutter.
         lineNumbers: false,
         foldGutter: false,
-        highlightActiveLine: false,
-        highlightActiveLineGutter: false,
+        highlightActiveLine: true,
+        highlightActiveLineGutter: true,
       }}
       style={{ height: '100%', flex: 1, minWidth: 0, overflow: 'hidden' }}
     />

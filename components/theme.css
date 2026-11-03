@@ -1,0 +1,66 @@
+/*
+ * Design tokens for the whole IDE. Every color, radius and font the chrome uses
+ * comes from here; dock.css and the components only reference these.
+ */
+:root {
+  color-scheme: dark;
+
+  --gj-bg: #08090b;
+  --gj-panel: #0f1013;
+  --gj-panel-2: #14161a;
+  --gj-hover: #1b1e24;
+  --gj-border: #1e2127;
+  --gj-border-strong: #2c3038;
+
+  --gj-text: #e8eaed;
+  --gj-text-2: #a6acb6;
+  --gj-text-3: #6b717c;
+
+  --gj-accent: #7cc4ff;
+  --gj-accent-strong: #3b9eff;
+  --gj-accent-soft: rgba(124, 196, 255, 0.13);
+
+  --gj-run: #22c55e;
+  --gj-run-hover: #2fd36b;
+  --gj-run-ink: #03140a;
+  --gj-danger: #f87171;
+  --gj-danger-soft: rgba(248, 113, 113, 0.14);
+  --gj-warn: #fbbf24;
+  --gj-warn-soft: rgba(251, 191, 36, 0.14);
+  --gj-ok: #4ade80;
+
+  --gj-radius: 10px;
+  --gj-radius-sm: 7px;
+  --gj-control-h: 30px;
+
+  --gj-font-ui: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue',
+    sans-serif;
+  --gj-font-mono: ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, Monaco, Consolas,
+    'Liberation Mono', monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--gj-font-ui);
+  font-size: 13px;
+  color: var(--gj-text);
+  background:
+    radial-gradient(1100px 480px at 0% -12%, rgba(124, 196, 255, 0.07), transparent 60%),
+    radial-gradient(900px 420px at 100% 110%, rgba(34, 197, 94, 0.04), transparent 60%),
+    var(--gj-bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font-family: inherit;
+}
+
+kbd {
+  font-family: var(--gj-font-ui);
+}

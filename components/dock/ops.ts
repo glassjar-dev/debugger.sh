@@ -76,6 +76,13 @@ export function setActive(state: DockState, groupId: string, pane: PaneId): Dock
   });
 }
 
+/** Bring `pane` to the front of whichever group holds it. No-op if closed or already active. */
+export function activatePane(state: DockState, pane: PaneId): DockState {
+  const group = collectGroups(state.root).find((g) => g.tabs.includes(pane));
+  if (!group || group.active === pane) return state;
+  return setActive(state, group.id, pane);
+}
+
 export function setSplitSizes(
   state: DockState,
   splitId: string,

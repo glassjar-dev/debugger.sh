@@ -70,9 +70,9 @@ export function ShareButton({ getState }: ShareButtonProps) {
   return (
     <button
       type="button"
-      className="ide-icon-btn ide-share-btn"
+      className="ide-btn ide-share-btn"
       aria-label={label}
-      title={label}
+      title={status === 'idle' ? 'Copy a link to this code' : label}
       disabled={status === 'saving'}
       data-status={status}
       onClick={() => void onShare()}
@@ -87,6 +87,9 @@ export function ShareButton({ getState }: ShareButtonProps) {
         <span className="ide-share-icon" data-active={status === 'copied'}>
           <CheckIcon />
         </span>
+      </span>
+      <span className="ide-btn-label" aria-hidden>
+        {label}
       </span>
     </button>
   );

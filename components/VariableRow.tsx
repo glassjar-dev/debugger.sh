@@ -66,67 +66,24 @@ export function VariableRow({ variable, expand, depth }: VariableRowProps) {
   };
 
   return (
-    <div style={{ paddingLeft: depth * 12 }}>
+    <div style={{ paddingLeft: depth * 14 }}>
       <div
+        className="ide-var-row"
+        data-expandable={expandable ? "true" : undefined}
         onClick={toggle}
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: 6,
-          padding: "2px 4px",
-          borderRadius: 2,
-          cursor: expandable ? "pointer" : "default",
-          minWidth: 0,
-        }}
       >
-        <span style={{ width: 10, color: "#666", flexShrink: 0 }}>
-          {expandable ? (expanded ? "▾" : "▸") : ""}
+        <span className="ide-var-chevron" data-open={expanded ? "true" : undefined}>
+          {expandable ? "▸" : ""}
         </span>
-        <span
-          title={variable.name}
-          style={{
-            color: "#e5e5e5",
-            flexShrink: 0,
-            maxWidth: "40%",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
+        <span className="ide-var-name" title={variable.name}>
           {variable.name}
         </span>
         {displayType && (
-          <span
-            title={displayType}
-            style={{
-              color: "#64748b",
-              fontSize: 10,
-              // Yield width before the value: long C++ types ellipsize first.
-              flex: "1 1 0",
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
+          <span className="ide-var-type" title={displayType}>
             {displayType}
           </span>
         )}
-        <span
-          title={displayValue}
-          style={{
-            color: "#94a3b8",
-            marginLeft: "auto",
-            textAlign: "right",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            // Prefer keeping the value visible; type truncates first.
-            flexShrink: 0,
-            minWidth: 0,
-            maxWidth: "55%",
-          }}
-        >
+        <span className="ide-var-value" title={displayValue}>
           {displayValue}
         </span>
       </div>

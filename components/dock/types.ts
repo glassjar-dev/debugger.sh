@@ -68,6 +68,27 @@ export function defaultDockState(): DockState {
   };
 }
 
+/** Phone layout: code on top, everything else as tabs underneath. */
+export function stackedDockState(): DockState {
+  return {
+    root: {
+      type: 'split',
+      id: 'split-root',
+      dir: 'v',
+      sizes: [56, 44],
+      children: [
+        { type: 'tabs', id: 'tabs-main', tabs: ['editor'], active: 'editor' },
+        {
+          type: 'tabs',
+          id: 'tabs-bottom',
+          tabs: ['output', 'tests', 'variables'],
+          active: 'output',
+        },
+      ],
+    },
+  };
+}
+
 export function isTabGroup(n: DockNode): n is TabGroup {
   return n.type === 'tabs';
 }

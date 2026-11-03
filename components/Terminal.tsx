@@ -1,7 +1,10 @@
 'use client';
 
-import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { SquareTerminal } from 'lucide-react';
 import '@xterm/xterm/css/xterm.css';
+
+import { EmptyState } from './EmptyState';
 
 export type TerminalHandle = {
   write: (data: string | Uint8Array) => void;
@@ -12,11 +15,13 @@ export type TerminalHandle = {
   onData: (handler: (data: string) => void) => () => void;
 };
 
+// Matches --gj-panel so the terminal sits flush in its card.
 const xtermTheme = {
-  background: '#000',
-  foreground: '#d4d4d4',
-  cursor: '#a5b4fc',
-  black: '#000',
+  background: '#0f1013',
+  foreground: '#d7dae0',
+  cursor: '#7cc4ff',
+  selectionBackground: 'rgba(124, 196, 255, 0.28)',
+  black: '#0f1013',
   brightBlack: '#666',
   red: '#cd3131',
   brightRed: '#f14c4c',
@@ -39,13 +44,24 @@ const Terminal = forwardRef<TerminalHandle>((_props, ref) => {
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null);
   const fitRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null);
   const dataDisposerRef = useRef<{ dispose: () => void } | null>(null);
+  // Show a hint until the program prints something.
+  const [hasOutput, setHasOutput] = useState(false);
 
   useImperativeHandle(
     ref,
     () => ({
-      write: (d) => termRef.current?.write(d),
-      writeln: (d) => termRef.current?.writeln(d),
-      clear: () => termRef.current?.clear(),
+      write: (d) => {
+        if (d.length) setHasOutput(true);
+        termRef.current?.write(d);
+      },
+      writeln: (d) => {
+        setHasOutput(true);
+        termRef.current?.writeln(d);
+      },
+      // xterm queues write() but runs clear() at once, so output still waiting in the
+      // queue would survive the clear and show up again in the redraw that follows.
+      // Clearing through the same queue (home, erase screen, erase scrollback) keeps order.
+      clear: () => termRef.current?.write('\x1b[H\x1b[2J\x1b[3J'),
       focus: () => termRef.current?.focus(),
       onData: (handler) => {
         dataDisposerRef.current?.dispose();
@@ -107,19 +123,28 @@ const Terminal = forwardRef<TerminalHandle>((_props, ref) => {
   }, []);
 
   return (
-    <div
-      ref={containerRef}
-      style={{
-        height: '100%',
-        width: '100%',
-        padding: 8,
-        boxSizing: 'border-box',
-        background: '#000',
-        flex: 1,
-        minHeight: 0,
-        overflow: 'hidden',
-      }}
-    />
+    <div className="ide-terminal-wrap">
+      <div
+        ref={containerRef}
+        style={{
+          height: '100%',
+          width: '100%',
+          padding: '10px 14px',
+          boxSizing: 'border-box',
+          background: xtermTheme.background,
+          flex: 1,
+          minHeight: 0,
+          overflow: 'hidden',
+        }}
+      />
+      {!hasOutput && (
+        <div className="ide-terminal-hint">
+          <EmptyState icon={<SquareTerminal size={18} />} title="Program output">
+            What your program prints shows up here. When it asks for input, click here and type.
+          </EmptyState>
+        </div>
+      )}
+    </div>
   );
 });
 

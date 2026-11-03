@@ -489,8 +489,8 @@ function SplitView({
   onSplitSizes: (splitId: string, sizes: [number, number]) => void;
 }) {
   const orientation = split.dir === "h" ? "horizontal" : "vertical";
-  /* 1px stroke — hover thickens via CSS, no gutter padding. */
-  const sepStyle = split.dir === "h" ? { width: 1 } : { height: 1 };
+  /* 8px gap between panel cards; hover draws an accent line via CSS. */
+  const sepStyle = split.dir === "h" ? { width: 8 } : { height: 8 };
   const childProps = {
     closed,
     visibleCount,

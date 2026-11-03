@@ -11,8 +11,9 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   output: "export",
   images: { unoptimized: true },
-  // Keep the prebundled debugger-sh dist from being re-compiled oddly by Next.
-  transpilePackages: ["debugger-sh"],
+  // No `transpilePackages` for the engine: it ships prebuilt, and transpiling it
+  // makes `next dev` inject React Refresh into its worker script, which then
+  // fails with "$RefreshReg$ is not defined".
   // Dev only (`next dev`); the static export has no rewrites. In production the
   // Worker serves /api/* itself.
   async rewrites() {
