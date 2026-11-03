@@ -1,42 +1,42 @@
-import { LANGS, type Lang } from '@/components/constants';
-import { parseDockState } from '@/components/dock/types';
-
-import { getSupabase } from './client';
-import { shortId } from './id';
+import { isShareId } from './id';
+import { MAX_SHARE_BYTES, MAX_SHARE_CODE_CHARS, parseWorkspaceState } from './state';
 import type { WorkspaceState } from './types';
 
-function isLang(value: unknown): value is Lang {
-  return typeof value === 'string' && value in LANGS;
-}
+export { parseWorkspaceState } from './state';
 
-export function parseWorkspaceState(value: unknown): WorkspaceState | null {
-  if (!value || typeof value !== 'object') return null;
-  const record = value as Record<string, unknown>;
-  if (!isLang(record.lang) || typeof record.code !== 'string') return null;
-  const layout = parseDockState(record.layout);
-  return layout
-    ? { lang: record.lang, code: record.code, layout }
-    : { lang: record.lang, code: record.code };
-}
+/** A share that failed for a reason worth showing the user as-is. */
+export class ShareError extends Error {}
 
 export async function createShare(state: WorkspaceState): Promise<string> {
+  if (state.code.length > MAX_SHARE_CODE_CHARS) {
+    throw new ShareError('Code is too long to share');
+  }
   const parsed = parseWorkspaceState(state);
   if (!parsed) throw new Error('Invalid workspace state');
 
-  const id = shortId();
-  const { error } = await getSupabase().from('shares').insert({ id, state: parsed });
-  if (error) throw error;
+  const body = JSON.stringify(parsed);
+  if (new TextEncoder().encode(body).byteLength > MAX_SHARE_BYTES) {
+    throw new ShareError('Code is too large to share');
+  }
+
+  const res = await fetch('/api/share', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body,
+  });
+  if (res.status === 503) throw new ShareError('Sharing is paused for today');
+  if (!res.ok) throw new Error(`Share failed (${res.status})`);
+  const { id } = (await res.json()) as { id?: unknown };
+  if (typeof id !== 'string') throw new Error('Share failed (bad response)');
   return id;
 }
 
 export async function getShare(id: string): Promise<WorkspaceState | null> {
-  const { data, error } = await getSupabase(id)
-    .from('shares')
-    .select('state')
-    .eq('id', id)
-    .maybeSingle();
-  if (error) throw error;
-  return parseWorkspaceState(data?.state);
+  if (!isShareId(id)) return null;
+  const res = await fetch(`/api/share/${encodeURIComponent(id)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`Loading share failed (${res.status})`);
+  return parseWorkspaceState(await res.json());
 }
 
 /** Path URL; Cloudflare SPA fallback serves `/` for unknown paths. */

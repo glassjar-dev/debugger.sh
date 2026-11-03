@@ -3,7 +3,7 @@
 import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
 
-import { createShare, shareUrl } from '@/lib/share/api';
+import { createShare, ShareError, shareUrl } from '@/lib/share/api';
 import type { WorkspaceState } from '@/lib/share/types';
 import { Telemetry } from '@/lib/telemetry/client';
 
@@ -53,7 +53,7 @@ export function ShareButton({ getState }: ShareButtonProps) {
     } catch (err) {
       console.error('share failed', err);
       setStatus('error');
-      toast.error('Share failed');
+      toast.error(err instanceof ShareError ? err.message : 'Share failed');
       window.setTimeout(() => setStatus('idle'), 2000);
     }
   }, [getState, status]);

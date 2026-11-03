@@ -1,5 +1,5 @@
-// Cloudflare Workers Static Assets config: tells wrangler to upload the
-// `next build` static export in `out/` and serve it from the edge.
+// Cloudflare Workers config: wrangler uploads the `next build` static export in
+// `out/` and serves it from the edge, and runs `worker/index.ts` for `/api/*`.
 //
 // Without this file, wrangler's auto-detection would see Next.js in
 // package.json and try the OpenNext SSR migration, which doesn't work for
@@ -10,11 +10,33 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "debugger-sh",
+  "main": "worker/index.ts",
   "compatibility_date": "2026-05-02",
   "assets": {
     "directory": "./out",
     // Unknown paths (e.g. /Ab3xY9kQ2m share links) serve index.html; the
     // client reads the share id from window.location.pathname.
-    "not_found_handling": "single-page-application"
-  }
+    "not_found_handling": "single-page-application",
+    // Only the API reaches the Worker; every other request is a static asset.
+    "run_worker_first": ["/api/*"]
+  },
+  // Shares (shares/<id>.json) and telemetry (events/dt=…/…ndjson).
+  "r2_buckets": [{ "binding": "DATA", "bucket_name": "glassjar-data" }],
+  // DataGate (worker/gate.ts) makes every R2 write: a daily write budget plus a
+  // telemetry buffer that flushes one object a minute. SQLite-backed, so it runs on
+  // the Workers Free plan.
+  "durable_objects": { "bindings": [{ "name": "GATE", "class_name": "DataGate" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["DataGate"] }],
+  "vars": {
+    // Hard ceiling on R2 writes per UTC day (shares + telemetry flushes). R2 includes
+    // 1M writes a month free; 30k a day stays under that.
+    "R2_DAILY_WRITE_LIMIT": "30000"
+  },
+  // Per-IP limits, keyed by cf-connecting-ip. `namespace_id` is any number
+  // unique within the Cloudflare account.
+  "ratelimits": [
+    { "name": "SHARE_LIMITER", "namespace_id": "1001", "simple": { "limit": 30, "period": 60 } },
+    { "name": "EVENTS_LIMITER", "namespace_id": "1002", "simple": { "limit": 60, "period": 60 } },
+    { "name": "SHARE_READ_LIMITER", "namespace_id": "1003", "simple": { "limit": 120, "period": 60 } }
+  ]
 }
