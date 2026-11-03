@@ -9,24 +9,40 @@
  * Everything lands in one R2 bucket:
  *
  *   shares/<id>.json
- *   events/dt=YYYY-MM-DD/HH/<received_ms>-<uuid>.ndjson
+ *   events/dt=YYYY-MM-DD/HH/<flushed_ms>-<uuid>.ndjson
+ *
+ * Every R2 write goes through `DataGate` (worker/gate.ts), which enforces a daily write
+ * budget and batches telemetry into one object a minute.
  */
 
 import { isShareId, shortId } from '@/lib/share/id';
-import { parseWorkspaceState } from '@/lib/share/state';
-import { TELEMETRY_EVENTS, type TelemetryEnvelope } from '@/lib/telemetry/events';
+import { MAX_SHARE_BYTES, parseWorkspaceState } from '@/lib/share/state';
+import {
+  MAX_EVENT_BYTES,
+  TELEMETRY_EVENTS,
+  droppedEvent,
+  utf8Bytes,
+  type TelemetryEnvelope,
+} from '@/lib/telemetry/events';
 
-interface Env {
-  DATA: R2Bucket;
+import type { DataGate, GateEnv } from './gate';
+
+export { DataGate } from './gate';
+
+interface Env extends GateEnv {
+  GATE: DurableObjectNamespace<DataGate>;
   SHARE_LIMITER: RateLimit;
+  SHARE_READ_LIMITER: RateLimit;
   EVENTS_LIMITER: RateLimit;
 }
 
-const MAX_SHARE_BYTES = 128 * 1024;
 const MAX_EVENTS_BYTES = 1024 * 1024;
 const MAX_EVENTS_PER_BATCH = 100;
-const MAX_EVENT_BYTES = 256 * 1024;
 const SESSION_ID = /^[0-9A-Za-z-]{1,64}$/;
+// What the browser's stamp clock produces (microsecond precision, always UTC).
+const TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$/;
+// Long enough to take down a share by deleting it, short enough to still save reads.
+const SHARE_CACHE_SECONDS = 3600;
 const EVENT_NAMES = new Set<string>(TELEMETRY_EVENTS);
 
 class HttpError extends Error {
@@ -46,7 +62,31 @@ function json(body: unknown, status = 200, headers: HeadersInit = {}): Response 
 }
 
 function fail(status: number, error: string): Response {
-  return json({ error }, status, { 'Cache-Control': 'no-store' });
+  const headers: Record<string, string> = { 'Cache-Control': 'no-store' };
+  // 503 means a budget or buffer is full; give it a while before trying again.
+  if (status === 503) headers['Retry-After'] = '600';
+  return json({ error }, status, headers);
+}
+
+function gate(env: Env): DurableObjectStub<DataGate> {
+  return env.GATE.get(env.GATE.idFromName('global'));
+}
+
+/**
+ * Only the IDE's own pages may write. Requiring a JSON content type makes any cross-site
+ * request need a CORS preflight, which fails because the API never sends CORS headers;
+ * the Sec-Fetch-Site and Origin checks reject the rest.
+ */
+function requireSameOriginJson(request: Request): void {
+  const type = request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase();
+  if (type !== 'application/json') throw new HttpError(415, 'Expected application/json');
+
+  const site = request.headers.get('sec-fetch-site');
+  if (site && site !== 'same-origin') throw new HttpError(403, 'Cross-site request');
+  const origin = request.headers.get('origin');
+  if (origin && origin !== new URL(request.url).origin) {
+    throw new HttpError(403, 'Cross-site request');
+  }
 }
 
 async function rateLimit(limiter: RateLimit, request: Request): Promise<void> {
@@ -89,6 +129,7 @@ async function readJson(request: Request, maxBytes: number): Promise<unknown> {
 }
 
 async function createShare(request: Request, env: Env): Promise<Response> {
+  requireSameOriginJson(request);
   await rateLimit(env.SHARE_LIMITER, request);
   const state = parseWorkspaceState(await readJson(request, MAX_SHARE_BYTES));
   if (!state) throw new HttpError(400, 'Invalid workspace state');
@@ -97,6 +138,9 @@ async function createShare(request: Request, env: Env): Promise<Response> {
   let id = shortId();
   while (await env.DATA.head(`shares/${id}.json`)) id = shortId();
 
+  if (!(await gate(env).reserveWrite())) {
+    throw new HttpError(503, 'Sharing is paused until tomorrow (UTC)');
+  }
   await env.DATA.put(`shares/${id}.json`, JSON.stringify(state), {
     httpMetadata: { contentType: 'application/json' },
   });
@@ -111,18 +155,19 @@ async function getShare(
 ): Promise<Response> {
   if (!isShareId(id)) throw new HttpError(404, 'Not found');
 
-  // Shares never change, so a cached copy is always correct.
+  // Shares never change, so a cached copy is always correct until one is taken down.
   const cache = caches.default;
   const cached = await cache.match(request);
   if (cached) return cached;
 
+  await rateLimit(env.SHARE_READ_LIMITER, request);
   const object = await env.DATA.get(`shares/${id}.json`);
   if (!object) throw new HttpError(404, 'Not found');
 
   const response = new Response(object.body, {
     headers: {
       'Content-Type': 'application/json',
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Cache-Control': `public, max-age=${SHARE_CACHE_SECONDS}`,
     },
   });
   ctx.waitUntil(cache.put(request, response.clone()));
@@ -133,7 +178,8 @@ function parseEnvelope(value: unknown): TelemetryEnvelope | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   if (typeof row.session_id !== 'string' || !SESSION_ID.test(row.session_id)) return null;
-  if (typeof row.timestamp !== 'string' || Number.isNaN(Date.parse(row.timestamp))) return null;
+  if (typeof row.timestamp !== 'string' || !TIMESTAMP.test(row.timestamp)) return null;
+  if (Number.isNaN(Date.parse(row.timestamp))) return null;
   if (typeof row.event !== 'string' || !EVENT_NAMES.has(row.event)) return null;
   const details = row.details;
   if (details !== null && (typeof details !== 'object' || Array.isArray(details))) return null;
@@ -146,29 +192,33 @@ function parseEnvelope(value: unknown): TelemetryEnvelope | null {
 }
 
 async function appendEvents(request: Request, env: Env): Promise<Response> {
+  requireSameOriginJson(request);
   await rateLimit(env.EVENTS_LIMITER, request);
   const body = await readJson(request, MAX_EVENTS_BYTES);
   if (!Array.isArray(body) || body.length === 0 || body.length > MAX_EVENTS_PER_BATCH) {
     throw new HttpError(400, 'Expected 1 to 100 events');
   }
 
-  const received = new Date();
-  const receivedAt = received.toISOString();
-  const lines: string[] = [];
+  const receivedAt = new Date().toISOString();
+  let ndjson = '';
+  let bytes = 0;
   for (const value of body) {
     const event = parseEnvelope(value);
     if (!event) throw new HttpError(400, 'Invalid event');
-    const line = JSON.stringify({ ...event, received_at: receivedAt });
-    if (line.length > MAX_EVENT_BYTES) throw new HttpError(413, 'Event too large');
-    lines.push(line);
+    let line = JSON.stringify({ ...event, received_at: receivedAt });
+    let size = utf8Bytes(line);
+    // Keep a record of anything too large to store, rather than rejecting the batch.
+    if (size > MAX_EVENT_BYTES) {
+      line = JSON.stringify({ ...droppedEvent(event, size), received_at: receivedAt });
+      size = utf8Bytes(line);
+    }
+    ndjson += line + '\n';
+    bytes += size + 1;
   }
 
-  const day = receivedAt.slice(0, 10);
-  const hour = receivedAt.slice(11, 13);
-  const key = `events/dt=${day}/${hour}/${received.getTime()}-${crypto.randomUUID()}.ndjson`;
-  await env.DATA.put(key, lines.join('\n') + '\n', {
-    httpMetadata: { contentType: 'application/x-ndjson' },
-  });
+  if ((await gate(env).bufferEvents(ndjson, bytes)) === 'full') {
+    throw new HttpError(503, 'Telemetry is paused; retry later');
+  }
   return new Response(null, { status: 204 });
 }
 

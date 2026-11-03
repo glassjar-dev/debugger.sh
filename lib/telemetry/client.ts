@@ -9,12 +9,15 @@ import {
   type EditAtom,
   type OpenEdit,
 } from './coalesce';
-import type { TelemetryEnvelope } from './events';
+import { MAX_EVENT_BYTES, droppedEvent, utf8Bytes, type TelemetryEnvelope } from './events';
 import type { Language, TelemetryDetails, TelemetryEvent } from './types';
 
 const QUEUE_KEY = 'dbg.telemetry.queue';
 const STABLE_KEY = 'dbg.telemetry.stable_id';
-const FLUSH_MS = 400;
+// Each send is a Worker request, and the Workers Free plan allows 100k a day per account.
+const FLUSH_MS = 10_000;
+// Leaves room for the `received_at` the Worker adds before checking MAX_EVENT_BYTES.
+const MAX_QUEUED_EVENT_BYTES = MAX_EVENT_BYTES - 1024;
 const LAYOUT_SETTLE_MS = 200;
 const IO_WINDOW_MS = 500;
 const MAX_QUEUE = 1000;
@@ -126,6 +129,15 @@ function scheduleFlush(delay: number) {
   }, delay);
 }
 
+/** Too large for the Worker to store: keep a record that it happened instead. */
+function fitEvent(envelope: QueuedEvent): QueuedEvent {
+  const line = JSON.stringify(envelope);
+  // A UTF-16 code unit is at most 3 UTF-8 bytes, so short lines skip the encode.
+  if (line.length * 3 <= MAX_QUEUED_EVENT_BYTES) return envelope;
+  const bytes = utf8Bytes(line);
+  return bytes > MAX_QUEUED_EVENT_BYTES ? droppedEvent(envelope, bytes) : envelope;
+}
+
 function enqueue(
   event: TelemetryEvent,
   details: unknown,
@@ -136,12 +148,13 @@ function enqueue(
   // Stamp older buffered edits/output first so client timestamps stay ordered.
   if (!skipFlush) flushPendingBefore(at);
   if (queue.length >= MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE + 1);
-  queue.push({
+  const envelope: QueuedEvent = {
     session_id: getSessionId(),
     timestamp: stamp(at),
     event,
     details: details ?? null,
-  });
+  };
+  queue.push(fitEvent(envelope));
   persist();
   scheduleFlush(FLUSH_MS);
 }

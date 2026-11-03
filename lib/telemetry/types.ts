@@ -219,6 +219,18 @@ export type TelemetryDetails = {
     /** The reason for the error (i.e. the error serialized to a string) */
     reason: string;
   };
+
+  /**
+   * Stands in for an event that was too large to store. Keeps the original event's
+   * session and timestamp, so the gap shows up in the timeline.
+   */
+  telemetry_dropped: {
+    reason: 'too_large';
+    /** Name of the event that was dropped */
+    event: string;
+    /** Size of the dropped event as one JSON line, in UTF-8 bytes */
+    bytes: number;
+  };
 };
 
 export type TelemetryEvent = keyof TelemetryDetails;

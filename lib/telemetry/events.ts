@@ -18,6 +18,7 @@ export const TELEMETRY_EVENTS = [
   'share',
   'layout_changed',
   'error',
+  'telemetry_dropped',
 ] as const satisfies readonly TelemetryEvent[];
 
 // Fails to compile when an event is added to `TelemetryDetails` but not listed above.
@@ -32,3 +33,20 @@ export type TelemetryEnvelope = {
   event: TelemetryEvent;
   details: unknown;
 };
+
+/** Largest event the Worker stores, as one JSON line in UTF-8 bytes. */
+export const MAX_EVENT_BYTES = 256 * 1024;
+
+export function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+/** The marker stored in place of an event that is too large to keep. */
+export function droppedEvent(event: TelemetryEnvelope, bytes: number): TelemetryEnvelope {
+  return {
+    session_id: event.session_id,
+    timestamp: event.timestamp,
+    event: 'telemetry_dropped',
+    details: { reason: 'too_large', event: event.event, bytes },
+  };
+}

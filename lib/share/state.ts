@@ -5,6 +5,8 @@ import type { WorkspaceState } from './types';
 
 /** Shared by the browser and the Worker, so it must stay free of DOM and React imports. */
 export const MAX_SHARE_CODE_CHARS = 100_000;
+/** Largest share request body the Worker accepts, in UTF-8 bytes of its JSON. */
+export const MAX_SHARE_BYTES = 128 * 1024;
 
 function isLang(value: unknown): value is Lang {
   return typeof value === 'string' && Object.hasOwn(LANGS, value);
