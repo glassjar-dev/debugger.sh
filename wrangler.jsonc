@@ -5,13 +5,15 @@
 // package.json and try the OpenNext SSR migration, which doesn't work for
 // `output: 'export'` static sites.
 //
-// The Worker is wired up via a Custom Domain in the Cloudflare dashboard.
+// Served at ide.yousefabuhashem.com (the custom domain below; wrangler creates the
+// DNS record and certificate on deploy) and at the account's workers.dev address.
 // Share links use /{id}; SPA not_found_handling serves index.html for those.
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "debugger-sh",
+  "name": "glassjar",
   "main": "worker/index.ts",
   "compatibility_date": "2026-05-02",
+  "routes": [{ "pattern": "ide.yousefabuhashem.com", "custom_domain": true }],
   "assets": {
     "directory": "./out",
     // Unknown paths (e.g. /Ab3xY9kQ2m share links) serve index.html; the
