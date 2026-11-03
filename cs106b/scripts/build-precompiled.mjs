@@ -153,7 +153,7 @@ if (artifactsFresh) {
     let bytes = await readFile(path).catch(() => undefined);
     if (!bytes || hash(bytes) !== expected) {
       console.log(`  fetching ${name}…`);
-      const response = await fetch('https://fabioibanez.github.io/website/' + name);
+      const response = await fetch('https://cdn.yousefabuhashem.com/clang/2026-05-22/' + name);
       if (!response.ok) throw new Error(`Cannot fetch ${name}: ${response.status}`);
       bytes = Buffer.from(await response.arrayBuffer());
       if (hash(bytes) !== expected) throw new Error(`Toolchain digest mismatch: ${name}`);

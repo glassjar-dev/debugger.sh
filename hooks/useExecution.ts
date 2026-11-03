@@ -151,7 +151,10 @@ export function useExecution({
     if (existing) return existing;
     let pending = engineInitRef.current[lang];
     if (!pending) {
-      pending = Engine.create(lang as Parameters<typeof Engine.create>[0]).then((engine) => {
+      // scripts/copy-engine-wasm.mjs puts the engine's own Wasm in public/.
+      pending = Engine.create(lang as Parameters<typeof Engine.create>[0], {
+        wasmUrl: '/engine_bg.wasm',
+      }).then((engine) => {
         enginesRef.current[lang] = engine;
         return engine;
       });

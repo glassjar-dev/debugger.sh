@@ -9,7 +9,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const engineJs = await readFile(join(root, 'node_modules/debugger-sh/dist/debugger-sh.js'));
+const engineDist = join(root, 'node_modules/debugger-sh/dist');
+const engineJs = await readFile(join(engineDist, 'glassjar.js'));
+const engineWasm = await readFile(join(engineDist, 'engine_bg.wasm'));
 const debugA = await readFile(join(root, 'public/cs106b/debug.a'));
 const pch = await readFile(join(root, 'public/cs106b/support.pch'));
 const dictionary = await readFile(join(root, 'public/cs106b/EnglishWords.dat'));
@@ -82,7 +84,7 @@ window.probe = {
   async run() {
     this.stdout = '';
     this.stderr = '';
-    const engine = await Engine.create('c');
+    const engine = await Engine.create('c', { wasmUrl: '/engine_bg.wasm' });
     const dec = new TextDecoder();
     engine.stdout.on('data', b => this.stdout += dec.decode(b));
     engine.stderr.on('data', b => this.stderr += dec.decode(b));
@@ -140,6 +142,21 @@ const server = createServer((req, res) => {
   } else if (url === '/engine.js') {
     res.writeHead(200, { 'Content-Type': 'text/javascript' });
     res.end(engineJs);
+  } else if (url === '/engine_bg.wasm') {
+    res.writeHead(200, { 'Content-Type': 'application/wasm' });
+    res.end(engineWasm);
+  } else if (url?.startsWith('/assets/') && /^\/assets\/[\w.-]+\.js$/.test(url)) {
+    // The engine loads its worker from assets/ next to /engine.js.
+    readFile(join(engineDist, url.slice(1))).then(
+      (body) => {
+        res.writeHead(200, { 'Content-Type': 'text/javascript' });
+        res.end(body);
+      },
+      () => {
+        res.writeHead(404);
+        res.end();
+      },
+    );
   } else if (url === '/debug.a') {
     res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
     res.end(debugA);
