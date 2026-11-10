@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
 import { cpp, cppLanguage } from '@codemirror/lang-cpp';
 import { python, pythonLanguage } from '@codemirror/lang-python';
@@ -61,7 +61,9 @@ const theme = {
     dotMargin: 8, // px (left)
     fill: '#f87171',
     glow: '0 0 8px rgba(248, 113, 113, 0.55)',
-    hover: 'rgba(248, 113, 113, 0.35)',
+    hover: 'rgba(248, 113, 113, 0.55)',
+    // Hollow ring on the cursor's line: shows where a click adds a breakpoint.
+    ring: 'rgba(248, 113, 113, 0.4)',
   },
   font: {
     family:
@@ -112,7 +114,8 @@ const editorChrome = EditorView.theme(
       color: theme.gutter.fg,
       cursor: 'pointer',
       userSelect: 'none',
-      paddingTop: '8px',
+      // No paddingTop: CodeMirror already offsets the gutter by .cm-content's
+      // padding, so adding it here pushed every line number 8px down.
     },
     '.cm-gutterElement.cm-activeLineGutter': { backgroundColor: 'transparent', color: theme.gutter.activeFg },
     '.cm-gj-gutter': {
@@ -130,16 +133,38 @@ const editorChrome = EditorView.theme(
       height: `${theme.breakpoint.dotSize}px`,
       borderRadius: '50%',
       background: 'transparent',
+      position: 'relative',
       transition: 'background 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease',
     },
-    // Hovering a line number previews where the breakpoint would go.
-    '.cm-gutterElement:hover .cm-gj-bp': { background: theme.breakpoint.hover },
+    // The cursor's line shows an empty slot, so the gutter reads as clickable.
+    '.cm-bp-enabled .cm-activeLineGutter .cm-gj-bp': { boxShadow: `inset 0 0 0 1.5px ${theme.breakpoint.ring}` },
+    // Hovering a line number previews the breakpoint.
+    '.cm-bp-enabled .cm-gutterElement:hover .cm-gj-bp': {
+      background: theme.breakpoint.hover,
+      boxShadow: `inset 0 0 0 1.5px ${theme.breakpoint.fill}`,
+    },
+    // Until someone sets their first breakpoint, the slot on the cursor's line
+    // sends out a slow ping.
+    '&.gj-bp-nudge .cm-activeLineGutter .cm-gj-bp:not([data-on])::after': {
+      content: '""',
+      position: 'absolute',
+      inset: '0',
+      borderRadius: '50%',
+      boxShadow: `0 0 0 1.5px ${theme.breakpoint.fill}`,
+      animation: 'gj-bp-ping 2.4s ease-out infinite',
+      pointerEvents: 'none',
+    },
+    '@keyframes gj-bp-ping': {
+      '0%': { transform: 'scale(1)', opacity: '0.9' },
+      '45%, 100%': { transform: 'scale(2.4)', opacity: '0' },
+    },
     '.cm-gj-bp[data-on]': {
       background: theme.breakpoint.fill,
       boxShadow: theme.breakpoint.glow,
     },
     '.cm-gutterElement:hover .cm-gj-bp[data-on]': {
       background: theme.breakpoint.fill,
+      boxShadow: theme.breakpoint.glow,
       transform: 'scale(0.85)',
     },
     '.cm-gj-gutter[data-bp] .cm-gj-num': { color: '#fca5a5' },
@@ -186,7 +211,11 @@ const breakpointsField = StateField.define<ReadonlySet<number>>({
 // One combined gutter row: hole/dot on the left, line number on the right
 // (matches the original textarea-era Gutter component layout).
 class LineGutterMarker extends GutterMarker {
-  constructor(readonly lineNumber: number, readonly hasBreakpoint: boolean) {
+  constructor(
+    readonly lineNumber: number,
+    readonly hasBreakpoint: boolean,
+    readonly breakpointsEnabled = false,
+  ) {
     super();
   }
 
@@ -194,7 +223,8 @@ class LineGutterMarker extends GutterMarker {
     return (
       other instanceof LineGutterMarker &&
       other.lineNumber === this.lineNumber &&
-      other.hasBreakpoint === this.hasBreakpoint
+      other.hasBreakpoint === this.hasBreakpoint &&
+      other.breakpointsEnabled === this.breakpointsEnabled
     );
   }
 
@@ -202,6 +232,9 @@ class LineGutterMarker extends GutterMarker {
     const wrap = document.createElement('div');
     wrap.className = 'cm-gj-gutter';
     if (this.hasBreakpoint) wrap.dataset.bp = '';
+    if (this.breakpointsEnabled) {
+      wrap.title = `${this.hasBreakpoint ? 'Remove' : 'Add'} breakpoint on line ${this.lineNumber}`;
+    }
 
     const dot = document.createElement('span');
     dot.className = 'cm-gj-bp';
@@ -223,12 +256,12 @@ function makeLineGutter(
   breakpointsEnabled: boolean,
 ) {
   return gutter({
-    class: 'cm-line-gutter',
+    class: breakpointsEnabled ? 'cm-line-gutter cm-bp-enabled' : 'cm-line-gutter',
     lineMarker: (view, line) => {
       const lineNumber = view.state.doc.lineAt(line.from).number;
       const hasBreakpoint =
         breakpointsEnabled && view.state.field(breakpointsField).has(lineNumber);
-      return new LineGutterMarker(lineNumber, hasBreakpoint);
+      return new LineGutterMarker(lineNumber, hasBreakpoint, breakpointsEnabled);
     },
     lineMarkerChange: (update) =>
       update.docChanged ||
@@ -281,9 +314,43 @@ export type CodeEditorProps = {
   stoppedLine: number | null;
 };
 
+const BREAKPOINT_HINT_DONE = 'glassjar.breakpointHintDone';
+
+// A state field (not a compartment) so it survives @uiw/react-codemirror
+// reconfiguring the editor on re-render.
+const setNudgeEffect = StateEffect.define<boolean>();
+const nudgeField = StateField.define<boolean>({
+  create: () => false,
+  update(value, tr) {
+    for (const e of tr.effects) if (e.is(setNudgeEffect)) value = e.value;
+    return value;
+  },
+  provide: (f) => EditorView.editorAttributes.from(f, (on): Record<string, string> => (on ? { class: 'gj-bp-nudge' } : {})),
+});
+
 export default function CodeEditor(props: CodeEditorProps) {
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const breakpointsEnabled = LANGS[props.lang].debug;
+
+  // First-timers get a pulsing hint in the gutter until they set a breakpoint.
+  const [nudge, setNudge] = useState(false);
+  useEffect(() => {
+    try {
+      setNudge(!localStorage.getItem(BREAKPOINT_HINT_DONE));
+    } catch {
+      // Storage blocked: skip the hint.
+    }
+  }, []);
+  useEffect(() => {
+    if (!nudge || props.breakpoints.size === 0) return;
+    setNudge(false);
+    try {
+      localStorage.setItem(BREAKPOINT_HINT_DONE, '1');
+    } catch {
+      // Storage blocked: the hint just comes back next visit.
+    }
+  }, [nudge, props.breakpoints]);
+  const showNudge = nudge && breakpointsEnabled;
 
   const toggleRef = useRef(props.onToggleBreakpoint);
   toggleRef.current = props.onToggleBreakpoint;
@@ -295,6 +362,7 @@ export default function CodeEditor(props: CodeEditorProps) {
       stoppedLineField,
       stoppedLineHighlight,
       makeLineGutter(toggleRef, breakpointsEnabled),
+      nudgeField,
       telemetryEditor(),
       syntaxHighlighting(codeSyntax),
       intellisense({
@@ -309,9 +377,9 @@ export default function CodeEditor(props: CodeEditorProps) {
   );
 
   // React → CM sync. Include lang/value so we don't apply line state mid-switch.
-  useEffect(() => {
-    const view = cmRef.current?.view;
-    if (!view) return;
+  // Also runs from onCreateEditor: @uiw/react-codemirror creates the view a
+  // render after mount, so the first effect can run before there is a view.
+  const sync = (view: EditorView) => {
     const maxLine = view.state.doc.lines;
     const breakpoints = Array.from(props.breakpoints).filter(
       (ln) => ln >= 1 && ln <= maxLine,
@@ -326,9 +394,16 @@ export default function CodeEditor(props: CodeEditorProps) {
       effects: [
         setBreakpointsEffect.of(breakpoints),
         setStoppedLineEffect.of(stoppedLine),
+        setNudgeEffect.of(showNudge),
       ],
     });
-  }, [props.lang, props.value, props.breakpoints, props.stoppedLine]);
+  };
+  const syncRef = useRef(sync);
+  syncRef.current = sync;
+  useEffect(() => {
+    const view = cmRef.current?.view;
+    if (view) syncRef.current(view);
+  }, [props.lang, props.value, props.breakpoints, props.stoppedLine, showNudge]);
 
   return (
     <CodeMirror
@@ -336,6 +411,7 @@ export default function CodeEditor(props: CodeEditorProps) {
       ref={cmRef}
       value={props.value}
       onChange={props.onChange}
+      onCreateEditor={(view) => syncRef.current(view)}
       extensions={extensions}
       // We own every visual style above (chrome + syntax) — no @uiw defaults.
       theme="none"
