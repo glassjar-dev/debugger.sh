@@ -24,7 +24,7 @@ const cache =
 const guestRoot = join(cache, 'sysroot');
 
 const compilerDigest =
-  '24fbed474c7b5b4968fd73fc4827440b93fb351c1b6264516130300eff3e7bf5';
+  '2d2c6ae498b27592a3cec7a270f274a08848a834e762cc08818c78626c32053a';
 const sysrootDigest =
   '8745c6af23fd841fa507d0c73f6b6b8e8da1b4ec216a6339739a28b38ff7227b';
 
@@ -153,7 +153,8 @@ if (artifactsFresh) {
     let bytes = await readFile(path).catch(() => undefined);
     if (!bytes || hash(bytes) !== expected) {
       console.log(`  fetching ${name}…`);
-      const response = await fetch('https://cdn.yousefabuhashem.com/clang/2026-05-22/' + name);
+      const release = name === 'llvm.core.wasm' ? '2026-11-10-slim' : '2026-05-22';
+      const response = await fetch(`https://cdn.yousefabuhashem.com/clang/${release}/${name}`);
       if (!response.ok) throw new Error(`Cannot fetch ${name}: ${response.status}`);
       bytes = Buffer.from(await response.arrayBuffer());
       if (hash(bytes) !== expected) throw new Error(`Toolchain digest mismatch: ${name}`);

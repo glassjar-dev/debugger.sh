@@ -6,7 +6,8 @@
  */
 const CDN = 'https://cdn.yousefabuhashem.com';
 
-export const CLANG_WASM_URL = `${CDN}/clang/2026-05-22/llvm.core.wasm`;
+// glassjar-dev/clang slim build; must match the engine's pinned compiler (shares its HTTP cache entry).
+export const CLANG_WASM_URL = `${CDN}/clang/2026-11-10-slim/llvm.core.wasm`;
 export const CLANG_SYSROOT_URL = `${CDN}/clang/2026-05-22/llvm-resources.tar.gz`;
 export const RUSTC_WASM_URL = `${CDN}/rust/2026-05-31/rustc.wasm`;
 export const RUST_SYSROOT_URL = `${CDN}/rust/2026-05-31/rust-sysroot.tar.gz`;
