@@ -18,6 +18,7 @@ import type { TestCase } from '@/lib/telemetry/types';
 import { loadStanfordArtifacts } from '@/lib/stanford/loadArtifacts';
 import { mergeDirNodes, pathsToDirNode } from '@/lib/stanford/fsTree';
 import { prepareCppRun } from '@/lib/testing/prepare';
+import { markRunnerReady } from '@/lib/intellisense/runnerReady';
 import {
   createTestReportDecoder,
   type TestResult,
@@ -168,7 +169,10 @@ export function useExecution({
   // Start the C++ worker and compiler as soon as the IDE mounts, so the first Run only
   // builds, and fetch the common (non-debug) Stanford artifacts. Debug archives load on demand.
   useEffect(() => {
-    preparingRef.current = getEngine('c').then((engine) => engine.prepareCompiler());
+    preparingRef.current = getEngine('c')
+      .then((engine) => engine.prepareCompiler())
+      // A Run started during the warm-up releases IntelliSense when it finishes instead.
+      .finally(() => !isRunningRef.current && markRunnerReady());
     void loadStanfordArtifacts('run');
   }, [getEngine]);
 
@@ -623,6 +627,7 @@ export function useExecution({
         teardown();
         clearDebug();
         setIsRunning(false);
+        markRunnerReady();
       }
     },
     [

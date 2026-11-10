@@ -14,6 +14,7 @@ import { LANGS, type Lang } from '@/components/constants';
 import { telemetryEditor } from '@/lib/telemetry/editor';
 import { intellisense } from '@/lib/intellisense/editor';
 import { getLanguageService } from '@/lib/intellisense/services';
+import { runnerReady } from '@/lib/intellisense/runnerReady';
 
 
 // ---------------------------------------------------------------------------
@@ -355,6 +356,15 @@ export default function CodeEditor(props: CodeEditorProps) {
   const toggleRef = useRef(props.onToggleBreakpoint);
   toggleRef.current = props.onToggleBreakpoint;
 
+  const [intellisenseOn, setIntellisenseOn] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void runnerReady.then(() => alive && setIntellisenseOn(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   const extensions = useMemo<Extension[]>(
     () => [
       LANG_EXTENSIONS[props.lang](),
@@ -365,15 +375,20 @@ export default function CodeEditor(props: CodeEditorProps) {
       nudgeField,
       telemetryEditor(),
       syntaxHighlighting(codeSyntax),
-      intellisense({
-        service: getLanguageService(props.lang),
-        language: LANG_INTELLISENSE[props.lang].language,
-        highlighter: codeSyntax,
-        lang: LANG_INTELLISENSE[props.lang].fence,
-      }),
+      // Attached once the run engine is warm, so loading it never slows Run down.
+      ...(intellisenseOn
+        ? [
+            intellisense({
+              service: getLanguageService(props.lang),
+              language: LANG_INTELLISENSE[props.lang].language,
+              highlighter: codeSyntax,
+              lang: LANG_INTELLISENSE[props.lang].fence,
+            }),
+          ]
+        : []),
       editorChrome,
     ],
-    [props.lang, breakpointsEnabled],
+    [props.lang, breakpointsEnabled, intellisenseOn],
   );
 
   // React → CM sync. Include lang/value so we don't apply line state mid-switch.
