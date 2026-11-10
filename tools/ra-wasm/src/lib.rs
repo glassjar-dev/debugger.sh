@@ -12,7 +12,7 @@ mod setup;
 use ra_ap_ide::{
     AdjustmentHints, AdjustmentHintsMode, AnalysisHost, AssistResolveStrategy, CallableSnippets,
     ClosureReturnTypeHints, CompletionConfig, CompletionFieldsToResolve, CompletionItem,
-    CompletionItemKind, DiagnosticsConfig, DiscriminantHints, FileId, FilePosition, FileRange,
+    CompletionItemKind, DiagnosticsConfig, DiscriminantHints, Edition, FileId, FilePosition, FileRange,
     GenericParameterHints, GotoDefinitionConfig, HoverConfig, HoverDocFormat, InlayFieldsToResolve,
     InlayHintPosition, InlayHintsConfig, InlayKind, LifetimeElisionHints, MemoryLayoutHoverConfig,
     MemoryLayoutHoverRenderKind, Severity, SubstTyLen, SymbolKind, TextRange, TextSize,
@@ -39,30 +39,41 @@ pub struct RustAnalyzer {
     text_pos: TextPos,
     /// Std file paths (relative to rust-src `library/`), indexed by `FileId - 1`.
     std_paths: Vec<String>,
+    /// Edition of main.rs; must match the `--edition` Run compiles with.
+    edition: Edition,
 }
 
 const MAIN_FILE: FileId = FileId::from_raw(0);
 
 #[wasm_bindgen]
 impl RustAnalyzer {
+    /// `edition` is the main crate's edition year (2015, 2018, 2021 or 2024).
     #[wasm_bindgen(constructor)]
-    pub fn new() -> RustAnalyzer {
+    pub fn new(edition: u16) -> Result<RustAnalyzer, JsError> {
         console_error_panic_hook::set_once();
+        let edition = match edition {
+            2015 => Edition::Edition2015,
+            2018 => Edition::Edition2018,
+            2021 => Edition::Edition2021,
+            2024 => Edition::Edition2024,
+            _ => return Err(JsError::new(&format!("unsupported edition {edition}"))),
+        };
         let mut ra = RustAnalyzer {
             host: AnalysisHost::new(None),
             text: String::new(),
             text_pos: TextPos::new(""),
             std_paths: Vec::new(),
+            edition,
         };
-        setup::apply_world(&mut ra.host, &ra.text, None);
-        ra
+        setup::apply_world(&mut ra.host, ra.edition, &ra.text, None);
+        Ok(ra)
     }
 
     /// `bundle` is the decompressed `rust-std.bin` produced by `pack-std.mjs`.
     pub fn load_std(&mut self, bundle: &[u8]) -> Result<(), JsError> {
         let files = setup::parse_bundle(bundle).map_err(|e| JsError::new(&e))?;
         self.std_paths = files.iter().map(|(p, _)| p.clone()).collect();
-        setup::apply_world(&mut self.host, &self.text, Some(files));
+        setup::apply_world(&mut self.host, self.edition, &self.text, Some(files));
         Ok(())
     }
 
@@ -243,12 +254,6 @@ impl RustAnalyzer {
             })
             .collect();
         Value::Array(out).to_string()
-    }
-}
-
-impl Default for RustAnalyzer {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

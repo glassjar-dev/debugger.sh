@@ -57,7 +57,10 @@ const wasm = initSync({ module: wasmBytes });
 const tInst = ms(t0);
 
 t0 = performance.now();
-const ra = new RustAnalyzer();
+const ra = new RustAnalyzer(2024);
+let badEdition = null;
+try { new RustAnalyzer(2019); } catch (e) { badEdition = String(e.message ?? e); }
+check("unknown edition is rejected", badEdition?.includes("unsupported edition 2019"), badEdition ?? "");
 const bundle = zlib.gunzipSync(fs.readFileSync(new URL("rust-std.bin.gz", dist)));
 const tGunzip = ms(t0);
 t0 = performance.now();

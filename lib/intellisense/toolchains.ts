@@ -11,6 +11,9 @@ export const CLANG_SYSROOT_URL = `${CDN}/clang/2026-05-22/llvm-resources.tar.gz`
 export const RUSTC_WASM_URL = `${CDN}/rust/2026-05-31/rustc.wasm`;
 export const RUST_SYSROOT_URL = `${CDN}/rust/2026-05-31/rust-sysroot.tar.gz`;
 
+/** The edition Run compiles Rust with (engine `start_rust`, `--edition`). */
+export const RUST_EDITION = 2024;
+
 /**
  * rust-analyzer built for wasm from tools/ra-wasm (ra_ap 0.0.358, std from Rust 1.99).
  * Versioned path on the CDN, never overwritten. For a local build, run
@@ -18,4 +21,4 @@ export const RUST_SYSROOT_URL = `${CDN}/rust/2026-05-31/rust-sysroot.tar.gz`;
  * (scripts/copy-intellisense.mjs copies dist/ there).
  */
 export const RUST_ANALYZER_BASE =
-  process.env.NEXT_PUBLIC_RUST_ANALYZER_BASE || `${CDN}/rust-analyzer/2026-11-09-ra0.0.358`;
+  process.env.NEXT_PUBLIC_RUST_ANALYZER_BASE || `${CDN}/rust-analyzer/2026-11-09-ra0.0.358-v2`;

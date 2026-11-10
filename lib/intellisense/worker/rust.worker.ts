@@ -7,7 +7,7 @@
  *    rust-analyzer compiled to wasm (tools/ra-wasm) with std sources.
  */
 
-import { RUST_ANALYZER_BASE, RUST_SYSROOT_URL, RUSTC_WASM_URL } from '../toolchains';
+import { RUST_ANALYZER_BASE, RUST_EDITION, RUST_SYSROOT_URL, RUSTC_WASM_URL } from '../toolchains';
 import type {
   CompletionItem,
   CompletionKind,
@@ -24,9 +24,9 @@ import { parseRustcDiagnostics } from './rustcOutput';
 import { compileModule, fetchBytes, gunzip, newRoot, runProcess, untar, writeFile } from './wasi';
 
 const MAIN = '/main.rs';
-/** Same flags as the engine's Run (no --edition, so rustc's default). */
+/** Same flags as the engine's Run. */
 const RUSTC_ARGS = [
-  'rustc', MAIN, '--sysroot', '/', '--target', 'wasm32-wasip1', '-Zthreads=1', '--emit=metadata',
+  'rustc', MAIN, `--edition=${RUST_EDITION}`, '--sysroot', '/', '--target', 'wasm32-wasip1', '-Zthreads=1', '--emit=metadata',
   '-o', '/main.rmeta', '--error-format=json', '--crate-type', 'bin',
 ];
 
@@ -65,12 +65,12 @@ console.error = (...args: unknown[]) => {
   consoleError(...args);
 };
 
-let raGlue: { RustAnalyzer: new () => RaApi } | null = null;
+let raGlue: { RustAnalyzer: new (edition: number) => RaApi } | null = null;
 let raStd: Uint8Array | null = null;
 
 /** A fresh analyzer over std. Indexing std takes ~1 s, so warm it up right away. */
 function startAnalyzer() {
-  const analyzer = new raGlue!.RustAnalyzer();
+  const analyzer = new raGlue!.RustAnalyzer(RUST_EDITION);
   analyzer.load_std(raStd!);
   // Index std and the common method tables before the user's first `.`.
   analyzer.set_text('fn main() {\n    let mut v: Vec<i32> = Vec::new();\n    let s = String::new();\n    v.\n    s.\n}\n');

@@ -57,14 +57,22 @@ pub fn parse_bundle(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
 
 /// `AbsPathBuf` for "/". Its constructors assert `Path::is_absolute`, which is
 /// always false on wasm32-unknown-unknown (std has no path semantics there), so
-/// build it from the inner `Utf8PathBuf` directly. `AbsPathBuf` is a plain
-/// newtype over `Utf8PathBuf`; `transmute` checks the sizes match. The value is
-/// only used as the (unused) proc-macro working directory.
+/// build it from the inner `Utf8PathBuf` directly. The value is only used as
+/// the (unused) proc-macro working directory, and nothing calls `as_path` on
+/// it, which would assert again.
+///
+/// `AbsPathBuf` is `struct AbsPathBuf(Utf8PathBuf)` in the pinned
+/// ra_ap_paths 0.0.358. If an upgrade changes that, `transmute` stops
+/// compiling when the size differs, and the round trip below panics at
+/// startup (caught by `node test.mjs`) when only the contents differ.
 fn root_abs_path() -> AbsPathBuf {
-    let inner = ra_ap_paths::Utf8PathBuf::from("/");
-    // SAFETY: `AbsPathBuf` is `struct AbsPathBuf(Utf8PathBuf)`, a single-field
-    // newtype, so it has the same layout as its field.
-    unsafe { std::mem::transmute::<ra_ap_paths::Utf8PathBuf, AbsPathBuf>(inner) }
+    use ra_ap_paths::Utf8PathBuf;
+    const _: () = assert!(std::mem::align_of::<AbsPathBuf>() == std::mem::align_of::<Utf8PathBuf>());
+    // SAFETY: a single-field newtype has the same layout as its field; the
+    // assertions above and below check that this still holds.
+    let path = unsafe { std::mem::transmute::<Utf8PathBuf, AbsPathBuf>(Utf8PathBuf::from("/")) };
+    assert_eq!(Utf8PathBuf::from(path.clone()).as_str(), "/", "AbsPathBuf is no longer a Utf8PathBuf newtype");
+    path
 }
 
 fn sym(s: &str) -> Symbol {
@@ -120,7 +128,12 @@ fn workspace_data() -> Arc<CrateWorkspaceData> {
 
 /// Replace source roots and the crate graph, and (re)set every file's text.
 /// `std_files == None` builds a world with only the main crate (no std).
-pub fn apply_world(host: &mut AnalysisHost, main_text: &str, std_files: Option<Vec<(String, String)>>) {
+pub fn apply_world(
+    host: &mut AnalysisHost,
+    edition: Edition,
+    main_text: &str,
+    std_files: Option<Vec<(String, String)>>,
+) {
     let proc_macro_cwd = Arc::new(root_abs_path());
     let ws = workspace_data();
     let mut change = ChangeWithProcMacros::default();
@@ -133,7 +146,7 @@ pub fn apply_world(host: &mut AnalysisHost, main_text: &str, std_files: Option<V
     let mut graph = CrateGraphBuilder::default();
     let main_crate = graph.add_crate_root(
         main_id,
-        Edition::Edition2021,
+        edition,
         Some(CrateDisplayName::from_canonical_name("main")),
         None,
         target_cfg(true),
