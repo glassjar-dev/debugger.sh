@@ -71,7 +71,7 @@ function perLang<T>(make: (lang: Lang) => T): Record<Lang, T> {
 }
 
 export default function Page() {
-  const [lang, setLang] = useState<Lang>('c');
+  const [lang, setLang] = useState<Lang>('python');
   const entry = entryFile(lang);
   const ws = useWorkspace(lang);
   const shape = useWorkspaceShape(lang);
@@ -108,6 +108,10 @@ export default function Page() {
   // Stable element identity so the xterm instance is not remounted on each IDE render.
   const terminal = useMemo(() => <Terminal ref={terminalRef} />, []);
   const exec = useExecution({ terminalRef });
+
+  // Warm the engine for whichever language is on screen, starting with the default.
+  const { warm } = exec;
+  useEffect(() => warm(lang), [warm, lang]);
 
   const setActive = useCallback((path: string) => setActiveByLang((prev) => (prev[lang] === path ? prev : { ...prev, [lang]: path })), [lang]);
 

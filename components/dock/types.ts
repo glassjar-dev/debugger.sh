@@ -79,7 +79,8 @@ export function defaultDockState(entry: string): DockState {
               type: 'tabs',
               id: 'tabs-bottom',
               tabs: ['output', 'tests'],
-              active: 'tests',
+              // Only C++ has a test runner; other languages open on their output.
+              active: entry.endsWith('.cpp') ? 'tests' : 'output',
             },
           ],
         },

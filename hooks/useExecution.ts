@@ -119,6 +119,8 @@ export type ExecutionApi = {
   expandVariable: (ref: number) => DapVariable[];
   /** Push a new breakpoint set to the running runtime (no-op if not running). */
   applyBreakpoints: (breakpoints: Breakpoints) => void;
+  /** Starts the engine for `lang` ahead of its first Run. Safe to call repeatedly. */
+  warm: (lang: Lang) => void;
 };
 
 export function useExecution({
@@ -175,15 +177,26 @@ export function useExecution({
     return pending;
   }, []);
 
-  // Start the C++ worker and compiler as soon as the IDE mounts, so the first Run only
-  // builds, and fetch the common (non-debug) Stanford artifacts. Debug archives load on demand.
-  useEffect(() => {
-    preparingRef.current = getEngine('c')
-      .then((engine) => engine.prepareCompiler())
+  const warmedRef = useRef<Set<Lang>>(new Set());
+  /**
+   * Starts the engine for the language on screen, so the first Run doesn't wait for it.
+   * For C++ that also loads the compiler and the common (non-debug) Stanford artifacts;
+   * debug archives load on demand.
+   */
+  const warm = useCallback(
+    (lang: Lang) => {
+      if (warmedRef.current.has(lang)) return;
+      warmedRef.current.add(lang);
+      let ready: Promise<unknown> = getEngine(lang);
+      if (lang === 'c') {
+        ready = preparingRef.current = getEngine('c').then((engine) => engine.prepareCompiler());
+        void loadStanfordArtifacts('run');
+      }
       // A Run started during the warm-up releases IntelliSense when it finishes instead.
-      .finally(() => !isRunningRef.current && markRunnerReady());
-    void loadStanfordArtifacts('run');
-  }, [getEngine]);
+      void ready.catch(() => undefined).finally(() => !isRunningRef.current && markRunnerReady());
+    },
+    [getEngine],
+  );
 
   const dapSend = useCallback(
     <T>(command: string, args: Record<string, unknown>) => {
@@ -735,5 +748,6 @@ export function useExecution({
     selectFrame,
     expandVariable,
     applyBreakpoints,
+    warm,
   };
 }
