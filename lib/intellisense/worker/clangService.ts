@@ -22,6 +22,7 @@ import {
   toCompletionItems,
   utf16ToByteCol,
 } from './clangOutput';
+import { docMarkdown, indexStanfordDocs, type StanfordDoc } from './stanfordDocs';
 import { readFile, runProcess, writeFile, type FsRoot } from './wasi';
 
 export const MAIN = '/main.cpp';
@@ -98,8 +99,19 @@ function enclosingCall(text: string, offset: number): { argStart: number; open: 
   return null;
 }
 
+/** Classes whose members are being completed: clang lists them as `Map : Map::` entries. */
+function receiverClasses(entries: string[]): string[] {
+  const out: string[] = [];
+  for (const e of entries) {
+    const m = e.match(/^([A-Z]\w*) : \1::$/);
+    if (m) out.push(m[1]);
+  }
+  return out;
+}
+
 export class ClangService {
   private stanfordNames: Set<string>;
+  private docs: Map<string, StanfordDoc>;
 
   constructor(
     private readonly module: WebAssembly.Module,
@@ -108,6 +120,17 @@ export class ClangService {
   ) {
     this.stanfordNames = new Set();
     for (const src of Object.values(stanfordHeaders)) for (const id of identifiersIn(src)) this.stanfordNames.add(id);
+    this.docs = indexStanfordDocs(stanfordHeaders);
+  }
+
+  /** Stanford docs for `name`, looked up on the receiver's class first. */
+  private docFor(name: string, classes: string[], member: boolean): string | undefined {
+    for (const c of classes) {
+      const d = this.docs.get(`${c}.${name}`);
+      if (d) return docMarkdown(d);
+    }
+    const d = member ? undefined : this.docs.get(name);
+    return d ? docMarkdown(d) : undefined;
   }
 
   /** One clang process per request; the worker host runs them one at a time. */
@@ -151,6 +174,11 @@ export class ClangService {
       localNames: identifiersIn(text.slice(0, start) + text.slice(offset)),
       stanfordNames: this.stanfordNames,
     });
+    const classes = memberAccess ? receiverClasses(completions) : [];
+    for (const item of items) {
+      if (item.documentation || !this.stanfordNames.has(item.label)) continue;
+      item.documentation = this.docFor(item.label, classes, memberAccess);
+    }
     return { from: positionOf(text, start), items };
   }
 
@@ -180,8 +208,10 @@ export class ClangService {
     if (start === end || /^\d/.test(text[start])) return null;
     const name = text.slice(start, end);
     const range = { start: positionOf(text, start), end: positionOf(text, end) };
+    let classes: string[] = [];
     const findIn = async (at: number) => {
       const { completions } = await this.completeAt(text, at, ['-code-completion-macros']);
+      classes = receiverClasses(completions);
       return completions
         .map(parseCompletionLine)
         .filter((p) => p && p.name === name && !p.pattern) as NonNullable<ReturnType<typeof parseCompletionLine>>[];
@@ -210,6 +240,10 @@ export class ClangService {
       .map((m) => (m.result ? `${m.result} ` : '') + m.display)
       .join('\n');
     const docs = [...new Set(matches.map((m) => m.brief).filter(Boolean))];
+    if (!docs.length && this.stanfordNames.has(name)) {
+      const extra = this.docFor(name, member ? classes : [], member) ?? (kind === 'class' ? this.docFor(name, [], false) : undefined);
+      if (extra) docs.push(extra);
+    }
     return {
       kind: matches.length > 1 ? `${kind} · ${matches.length} overloads` : kind,
       code: kind === 'class' && !p.result && p.display === name ? `class ${name}` : code,
