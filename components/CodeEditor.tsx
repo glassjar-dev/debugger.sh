@@ -2,16 +2,18 @@
 
 import { useEffect, useMemo, useRef } from 'react';
 import CodeMirror, { type ReactCodeMirrorRef } from '@uiw/react-codemirror';
-import { cpp } from '@codemirror/lang-cpp';
-import { python } from '@codemirror/lang-python';
-import { rust } from '@codemirror/lang-rust';
+import { cpp, cppLanguage } from '@codemirror/lang-cpp';
+import { python, pythonLanguage } from '@codemirror/lang-python';
+import { rust, rustLanguage } from '@codemirror/lang-rust';
 import { Decoration, EditorView, gutter, GutterMarker } from '@codemirror/view';
 import { StateEffect, StateField, type Extension } from '@codemirror/state';
-import { HighlightStyle, syntaxHighlighting } from '@codemirror/language';
+import { HighlightStyle, syntaxHighlighting, type LRLanguage } from '@codemirror/language';
 import { tags as t } from '@lezer/highlight';
 
 import { LANGS, type Lang } from '@/components/constants';
 import { telemetryEditor } from '@/lib/telemetry/editor';
+import { intellisense } from '@/lib/intellisense/editor';
+import { getLanguageService } from '@/lib/intellisense/services';
 
 
 // ---------------------------------------------------------------------------
@@ -22,6 +24,13 @@ const LANG_EXTENSIONS: Record<Lang, () => Extension> = {
   c: cpp,
   python: python,
   rust: rust,
+};
+
+/** Parser + Markdown fence name used to highlight code inside hovers and docs. */
+const LANG_INTELLISENSE: Record<Lang, { language: LRLanguage; fence: string }> = {
+  c: { language: cppLanguage, fence: 'cpp' },
+  python: { language: pythonLanguage, fence: 'python' },
+  rust: { language: rustLanguage, fence: 'rust' },
 };
 
 // ---------------------------------------------------------------------------
@@ -288,6 +297,12 @@ export default function CodeEditor(props: CodeEditorProps) {
       makeLineGutter(toggleRef, breakpointsEnabled),
       telemetryEditor(),
       syntaxHighlighting(codeSyntax),
+      intellisense({
+        service: getLanguageService(props.lang),
+        language: LANG_INTELLISENSE[props.lang].language,
+        highlighter: codeSyntax,
+        lang: LANG_INTELLISENSE[props.lang].fence,
+      }),
       editorChrome,
     ],
     [props.lang, breakpointsEnabled],
@@ -330,6 +345,8 @@ export default function CodeEditor(props: CodeEditorProps) {
         foldGutter: false,
         highlightActiveLine: true,
         highlightActiveLineGutter: true,
+        // IntelliSense (lib/intellisense) brings its own semantic completion.
+        autocompletion: false,
       }}
       style={{ height: '100%', flex: 1, minWidth: 0, overflow: 'hidden' }}
     />

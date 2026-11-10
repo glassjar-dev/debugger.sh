@@ -22,3 +22,6 @@ public/assets/
 
 .env.production
 dist-worker
+
+# Language tooling copied from node_modules / tools/ra-wasm (npm run copy:intellisense)
+public/intellisense/
