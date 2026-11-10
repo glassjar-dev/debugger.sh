@@ -109,7 +109,12 @@ class LensWidget extends WidgetType {
     const span = el('span', `gj-lens gj-lens-${this.severity}`);
     span.append(el('span', 'gj-lens-text', this.text));
     if (this.more) span.append(el('span', 'gj-lens-more', `+${this.more}`));
-    return span;
+    // CodeMirror draws an end-of-line cursor at the widget's outer edge. The
+    // lens's left margin sits inside this wrapper, so that edge stays where
+    // the text ends instead of jumping to the message.
+    const wrap = el('span', 'gj-lens-wrap');
+    wrap.append(span);
+    return wrap;
   }
   ignoreEvent() {
     return true;
