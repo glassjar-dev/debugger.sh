@@ -189,6 +189,7 @@ function flushPendingBefore(at: number) {
 
 function editDetails(edit: OpenEdit): TelemetryDetails['edit'] {
   return {
+    ...(edit.file ? { file: edit.file } : {}),
     offset: edit.offset,
     ...(edit.deleted > 0 ? { deleted: edit.deleted } : {}),
     ...(edit.inserted.length > 0 ? { inserted: edit.inserted } : {}),
@@ -432,6 +433,7 @@ function onRejection(ev: PromiseRejectionEvent) {
 export type SessionStartInput = {
   language: Language;
   code: string;
+  files?: Record<string, string>;
   layout: DockState;
   shareId?: string;
 };
@@ -468,6 +470,7 @@ export class Telemetry {
         case 'edit': {
           const payload = details as TelemetryDetails['edit'];
           noteEdit({
+            file: payload.file,
             offset: payload.offset,
             deleted: payload.deleted ?? 0,
             inserted: payload.inserted ?? '',
@@ -508,6 +511,7 @@ export class Telemetry {
         stable_id: stableId(),
         language: input.language,
         code: input.code,
+        ...(input.files ? { files: input.files } : {}),
         layout: input.layout,
         viewport: {
           width: window.innerWidth,

@@ -49,8 +49,10 @@ export type TelemetryDetails = {
     share_id?: string;
     /** Language selected when the session became ready. */
     language: Language;
-    /** Contents of the file at the start of the session */
+    /** Contents of the entry file at the start of the session */
     code?: string;
+    /** Every file in the workspace at the start of the session, by path */
+    files?: Record<string, string>;
     /** Layout at the start of the session */
     layout: DockState;
     /** CSS viewport information  */
@@ -104,6 +106,8 @@ export type TelemetryDetails = {
    * on the client to spread them out into a total order.
    */
   edit: {
+    /** Workspace path of the edited file, like `lib/list.cpp`. Absent before multi-file workspaces. */
+    file?: string;
     /** The start position in the document before the edit */
     offset: number;
     /** Count of deleted characters. `undefined` means 0 (an insertion) */
@@ -160,6 +164,8 @@ export type TelemetryDetails = {
 
   /** A breakpoint was added or removed */
   debug_breakpoint: {
+    /** Workspace path of the file. */
+    file?: string;
     /** 1-based line. */
     line: number;
     /** Whether the breakpoint was added or removed */
@@ -170,6 +176,8 @@ export type TelemetryDetails = {
   debug_stop: {
     /** Why execution stopped. */
     reason: "breakpoint" | "step" | "exception" | "pause";
+    /** Workspace path of the file the top frame is in. */
+    file?: string;
     /** 1-based line of the top frame in the user's file. `undefined` if the stop is outside that file. */
     line?: number;
     /** Number of visible stack frames shown to the user */

@@ -28,6 +28,18 @@ export function writeFile(root: FsRoot, path: string, data: Uint8Array | string)
   dir.set(parts[parts.length - 1], new File(bytes));
 }
 
+/** Removes the file at absolute `path`, if there is one. */
+export function removeFile(root: FsRoot, path: string): void {
+  const parts = path.split('/').filter(Boolean);
+  let dir = root;
+  for (const part of parts.slice(0, -1)) {
+    const next = dir.get(part);
+    if (!(next instanceof Directory)) return;
+    dir = next.contents;
+  }
+  dir.delete(parts[parts.length - 1]);
+}
+
 export function readFile(root: FsRoot, path: string): Uint8Array | null {
   let node: Inode | undefined;
   let dir = root;

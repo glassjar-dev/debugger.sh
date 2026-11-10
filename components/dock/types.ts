@@ -1,13 +1,32 @@
-export type PaneId = 'editor' | 'variables' | 'output' | 'tests';
+import { basename, normalizePath } from '@/lib/workspace/paths';
 
-export const PANE_IDS: readonly PaneId[] = ['editor', 'variables', 'output', 'tests'];
+/** Tool panes that always exist; they reopen from a tab bar's + menu. */
+export type BuiltinPane = 'variables' | 'output' | 'tests';
+/** An open file, one tab per path. Closing the tab doesn't delete the file. */
+export type FilePane = `file:${string}`;
+export type PaneId = BuiltinPane | FilePane;
 
-export const PANE_LABELS: Record<PaneId, string> = {
-  editor: 'Code',
+export const BUILTIN_PANES: readonly BuiltinPane[] = ['variables', 'output', 'tests'];
+
+export const PANE_LABELS: Record<BuiltinPane, string> = {
   variables: 'Variables',
   output: 'Terminal',
   tests: 'Tests',
 };
+
+export function filePane(path: string): FilePane {
+  return `file:${path}`;
+}
+
+/** The file a pane shows, or null for a tool pane. */
+export function paneFile(pane: PaneId): string | null {
+  return pane.startsWith('file:') ? pane.slice(5) : null;
+}
+
+export function paneLabel(pane: PaneId): string {
+  const file = paneFile(pane);
+  return file ? basename(file) : PANE_LABELS[pane as BuiltinPane];
+}
 
 export type SplitDir = 'h' | 'v';
 export type DropEdge = 'center' | 'left' | 'right' | 'top' | 'bottom';
@@ -39,7 +58,8 @@ export function newId(prefix: string): string {
   return `${prefix}-${nextId}`;
 }
 
-export function defaultDockState(): DockState {
+export function defaultDockState(entry: string): DockState {
+  const main = filePane(entry);
   return {
     root: {
       type: 'split',
@@ -47,7 +67,7 @@ export function defaultDockState(): DockState {
       dir: 'h',
       sizes: [62, 38],
       children: [
-        { type: 'tabs', id: 'tabs-main', tabs: ['editor'], active: 'editor' },
+        { type: 'tabs', id: 'tabs-main', tabs: [main], active: main },
         {
           type: 'split',
           id: 'split-right',
@@ -69,7 +89,8 @@ export function defaultDockState(): DockState {
 }
 
 /** Phone layout: code on top, everything else as tabs underneath. */
-export function stackedDockState(): DockState {
+export function stackedDockState(entry: string): DockState {
+  const main = filePane(entry);
   return {
     root: {
       type: 'split',
@@ -77,7 +98,7 @@ export function stackedDockState(): DockState {
       dir: 'v',
       sizes: [56, 44],
       children: [
-        { type: 'tabs', id: 'tabs-main', tabs: ['editor'], active: 'editor' },
+        { type: 'tabs', id: 'tabs-main', tabs: [main], active: main },
         {
           type: 'tabs',
           id: 'tabs-bottom',
@@ -121,24 +142,42 @@ export function visiblePanes(state: DockState): Set<PaneId> {
   return set;
 }
 
-export function closedPanes(state: DockState): PaneId[] {
+/** Tool panes not in the layout, offered by the + menu. Closed files reopen from the explorer. */
+export function closedPanes(state: DockState): BuiltinPane[] {
   const vis = visiblePanes(state);
-  return PANE_IDS.filter((p) => !vis.has(p));
+  return BUILTIN_PANES.filter((p) => !vis.has(p));
 }
 
-function isPaneId(value: unknown): value is PaneId {
-  return typeof value === 'string' && (PANE_IDS as readonly string[]).includes(value);
+/** Every file with a tab, in layout order. */
+export function openFiles(state: DockState): string[] {
+  const out: string[] = [];
+  for (const g of collectGroups(state.root))
+    for (const t of g.tabs) {
+      const file = paneFile(t);
+      if (file) out.push(file);
+    }
+  return out;
 }
 
-function parseDockNode(value: unknown): DockNode | null {
+/** Old layouts had one `editor` pane; it becomes the entry file's tab. */
+function parsePaneId(value: unknown, entry: string): PaneId | null {
+  if (value === 'editor') return filePane(entry);
+  if (typeof value !== 'string') return null;
+  if ((BUILTIN_PANES as readonly string[]).includes(value)) return value as BuiltinPane;
+  const file = value.startsWith('file:') ? value.slice(5) : null;
+  return file && normalizePath(file) === file ? filePane(file) : null;
+}
+
+function parseDockNode(value: unknown, entry: string): DockNode | null {
   if (!value || typeof value !== 'object') return null;
   const n = value as Record<string, unknown>;
 
   if (n.type === 'tabs') {
-    if (typeof n.id !== 'string' || !Array.isArray(n.tabs) || !isPaneId(n.active)) return null;
-    const tabs = n.tabs.filter(isPaneId);
-    if (tabs.length === 0 || !tabs.includes(n.active)) return null;
-    return { type: 'tabs', id: n.id, tabs, active: n.active };
+    const active = parsePaneId(n.active, entry);
+    if (typeof n.id !== 'string' || !Array.isArray(n.tabs) || !active) return null;
+    const tabs = [...new Set(n.tabs.map((t) => parsePaneId(t, entry)).filter((t): t is PaneId => !!t))];
+    if (tabs.length === 0 || !tabs.includes(active)) return null;
+    return { type: 'tabs', id: n.id, tabs, active };
   }
 
   if (n.type === 'split') {
@@ -148,8 +187,8 @@ function parseDockNode(value: unknown): DockNode | null {
     const s0 = Number(n.sizes[0]);
     const s1 = Number(n.sizes[1]);
     if (!Number.isFinite(s0) || !Number.isFinite(s1)) return null;
-    const a = parseDockNode(n.children[0]);
-    const b = parseDockNode(n.children[1]);
+    const a = parseDockNode(n.children[0], entry);
+    const b = parseDockNode(n.children[1], entry);
     if (!a || !b) return null;
     return { type: 'split', id: n.id, dir: n.dir, children: [a, b], sizes: [s0, s1] };
   }
@@ -157,10 +196,10 @@ function parseDockNode(value: unknown): DockNode | null {
   return null;
 }
 
-/** Best-effort parse of a persisted dock tree; null if unusable. */
-export function parseDockState(value: unknown): DockState | null {
+/** Best-effort parse of a persisted dock tree; null if unusable. `entry` replaces a legacy `editor` pane. */
+export function parseDockState(value: unknown, entry: string): DockState | null {
   if (!value || typeof value !== 'object') return null;
-  const root = parseDockNode((value as { root?: unknown }).root);
+  const root = parseDockNode((value as { root?: unknown }).root, entry);
   return root ? { root } : null;
 }
 

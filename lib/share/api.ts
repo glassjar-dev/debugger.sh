@@ -8,9 +8,9 @@ export { parseWorkspaceState } from './state';
 export class ShareError extends Error {}
 
 export async function createShare(state: WorkspaceState): Promise<string> {
-  if (state.code.length > MAX_SHARE_CODE_CHARS) {
-    throw new ShareError('Code is too long to share');
-  }
+  let chars = 0;
+  for (const text of Object.values(state.files)) chars += text.length;
+  if (chars > MAX_SHARE_CODE_CHARS) throw new ShareError('Code is too long to share');
   const parsed = parseWorkspaceState(state);
   if (!parsed) throw new Error('Invalid workspace state');
 

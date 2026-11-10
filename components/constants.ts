@@ -2,6 +2,7 @@ export type Lang = 'c' | 'python' | 'rust';
 
 export type LangConfig = {
   label: string;
+  /** The entry file: where runs start. It can't be renamed or deleted. */
   fsKey: string;
   /** DAP `setBreakpoints` path — must match the worker's virtual source path. */
   sourcePath: string;
@@ -13,8 +14,8 @@ export type LangConfig = {
 export const LANGS: Record<Lang, LangConfig> = {
   c: {
     label: 'C++',
-    fsKey: 'main.c',
-    sourcePath: '/main.c',
+    fsKey: 'main.cpp',
+    sourcePath: '/main.cpp',
     defaultCode: `#include <iostream>
 #include "vector.h"
 #include "SimpleTest.h"

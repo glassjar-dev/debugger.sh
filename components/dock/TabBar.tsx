@@ -3,11 +3,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { useDraggable, useDroppable } from '@dnd-kit/core';
 
-import { PANE_LABELS, type PaneId, type TabGroup } from './types';
+import { FileIcon } from '@/components/files/FileIcon';
+
+import { PANE_LABELS, paneFile, paneLabel, type BuiltinPane, type PaneId, type TabGroup } from './types';
 
 export type TabBarProps = {
   group: TabGroup;
-  closed: PaneId[];
+  closed: BuiltinPane[];
   onSelect: (pane: PaneId) => void;
   onClose: (pane: PaneId) => void;
   onOpen: (pane: PaneId) => void;
@@ -103,6 +105,8 @@ function DockTab({
     id: `tab-${groupId}-${pane}`,
     data: { kind: 'tab', pane, groupId },
   });
+  const file = paneFile(pane);
+  const label = paneLabel(pane);
 
   return (
     <div
@@ -115,14 +119,22 @@ function DockTab({
       {...listeners}
       {...attributes}
       role="tab"
+      title={file ?? undefined}
       onClick={onSelect}
+      // Middle-click closes, as in every editor.
+      onAuxClick={(e) => {
+        if (e.button !== 1 || !canClose) return;
+        e.preventDefault();
+        onClose();
+      }}
     >
-      <span className="ide-tab-label">{PANE_LABELS[pane]}</span>
+      {file && <FileIcon path={file} size={13} />}
+      <span className="ide-tab-label">{label}</span>
       {canClose && (
         <button
           type="button"
           className="ide-tab-close"
-          aria-label={`Close ${PANE_LABELS[pane]}`}
+          aria-label={`Close ${label}`}
           title="Close"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
@@ -137,7 +149,7 @@ function DockTab({
   );
 }
 
-function AddMenu({ closed, onOpen }: { closed: PaneId[]; onOpen: (pane: PaneId) => void }) {
+function AddMenu({ closed, onOpen }: { closed: BuiltinPane[]; onOpen: (pane: PaneId) => void }) {
   const [open, setOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; right: number } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);

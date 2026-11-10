@@ -10,10 +10,10 @@
 import { simpleTestRunner } from '@/cs106b/generated/simpleTestRunner';
 
 export type PreparedCppRun = {
-  /** Files to merge into engine.fs (besides Stanford headers / student main). */
+  /** The workspace files for engine.fs (besides Stanford headers), rewritten where tests need it. */
   files: Record<string, string>;
-  /** Absolute virtual paths that must be compiled (in addition to selected student sources). */
-  extraSources: string[];
+  /** Absolute virtual paths of every C++ source to compile. */
+  sources: string[];
   /** Whether this run uses the injected test runner as the entrypoint. */
   hasTests: boolean;
   nonce: string;
@@ -263,52 +263,62 @@ export function sourceHasTests(source: string): boolean {
   return declarations('/main.c', source).length > 0;
 }
 
+/** C++ sources the engine compiles; headers and data files ride along. */
+function isCppSource(path: string): boolean {
+  return /\.(c|cc|cp|cpp|cxx|c\+\+)$/i.test(path);
+}
+
 /**
- * Prepare C/C++ sources for a Run. When tests are present, rewrites macros,
- * renames user main, and adds a runner that calls main then runs tests.
+ * Prepare a C/C++ workspace for a Run. When any file has tests, rewrites their macros in
+ * every file, renames the user's main in the file that defines it and appends the runner
+ * there, so the runner calls main and then the tests. Paths are workspace-relative
+ * (`main.cpp`, `lib/list.cpp`); `sources` lists the absolute paths to compile.
  * SimpleTest.h itself always comes from the Stanford support FS.
  */
-export function prepareCppRun(studentSource: string, studentPath = 'main.c'): PreparedCppRun {
-  const found = declarations('/' + studentPath, studentSource);
-  if (found.length === 0) {
-    return { files: { [studentPath]: studentSource }, extraSources: [], hasTests: false, nonce: '' };
+export function prepareCppRun(
+  workspace: Readonly<Record<string, string>>,
+  entry = 'main.cpp',
+): PreparedCppRun {
+  const paths = Object.keys(workspace).filter(isCppSource).sort();
+  const sources = paths.map((p) => `/${p}`);
+  const tests = new Map(paths.map((p) => [p, declarations(`/${p}`, workspace[p]!)] as const));
+  if (![...tests.values()].some((found) => found.length > 0)) {
+    return { files: { ...workspace }, sources, hasTests: false, nonce: '' };
   }
 
-  const edits = found.flatMap((f) => f.edits).sort((a, b) => b.start - a.start);
-  let transformed = studentSource;
-  for (const edit of edits) {
-    transformed = transformed.slice(0, edit.start) + edit.text + transformed.slice(edit.end);
-  }
-  const { source: renamed, hadMain } = hideUserMain(transformed);
   const nonce = randomNonce();
-  // DAP sets breakpoints on the absolute virtual path (e.g. `/main.c`). The
-  // engine matches DWARF paths with exact equality, so `#line` must use that
-  // same absolute path — a relative `main.c` will never hit.
-  const dapPath = studentPath.startsWith('/') ? studentPath : `/${studentPath}`;
-  // Fold the tiny runner into the student TU. SimpleTest.cpp lives in the
-  // precompiled CS106B archive (run.a / debug.a), so a test run is one clang
-  // invocation instead of three — the engine reloads ~75MB clang wasm per file.
-  const runnerBody = simpleTestRunner.replace(/^#include\s+"SimpleTest(?:_config)?\.h"\s*\n/gm, '');
-  const preparedSource = [
-    '#pragma clang diagnostic push',
-    '#pragma clang diagnostic ignored "-Wreturn-type"',
-    '#pragma clang diagnostic ignored "-Wunused-parameter"',
-    `#line 1 "${dapPath}"`,
-    renamed,
-    '#pragma clang diagnostic pop',
-    '',
-    '#include "SimpleTest_config.h"',
-    runnerBody,
-  ].join('\n');
-
-  return {
-    hasTests: true,
-    nonce,
-    files: {
-      [studentPath]: preparedSource,
-      // Header is already in the Stanford FS; only the per-run config is injected.
-      'SimpleTest_config.h': makeConfig(nonce, hadMain),
-    },
-    extraSources: [],
-  };
+  // The runner goes where main is (it calls it), or into the entry file when nothing defines main.
+  const mainFile = paths.find((p) => hideUserMain(workspace[p]!).hadMain) ?? (paths.includes(entry) ? entry : paths[0]!);
+  const files: Record<string, string> = { ...workspace };
+  let hadMain = false;
+  for (const path of paths) {
+    const found = tests.get(path)!;
+    if (found.length === 0 && path !== mainFile) continue;
+    const edits = found.flatMap((f) => f.edits).sort((a, b) => b.start - a.start);
+    let transformed = workspace[path]!;
+    for (const edit of edits) {
+      transformed = transformed.slice(0, edit.start) + edit.text + transformed.slice(edit.end);
+    }
+    const lines = [
+      '#pragma clang diagnostic push',
+      '#pragma clang diagnostic ignored "-Wreturn-type"',
+      '#pragma clang diagnostic ignored "-Wunused-parameter"',
+      // DAP breakpoints use the absolute virtual path, and the engine matches DWARF paths
+      // exactly, so `#line` must name that same path to keep breakpoints hitting.
+      `#line 1 "/${path}"`,
+    ];
+    if (path === mainFile) {
+      const hidden = hideUserMain(transformed);
+      hadMain = hidden.hadMain;
+      // Fold the tiny runner into this TU. SimpleTest.cpp lives in the precompiled CS106B
+      // archive (run.a / debug.a), so tests add no extra clang invocation.
+      const runnerBody = simpleTestRunner.replace(/^#include\s+"SimpleTest(?:_config)?\.h"\s*\n/gm, '');
+      files[path] = [...lines, hidden.source, '#pragma clang diagnostic pop', '', '#include "SimpleTest_config.h"', runnerBody].join('\n');
+    } else {
+      files[path] = [...lines, transformed, '#pragma clang diagnostic pop', ''].join('\n');
+    }
+  }
+  // Header is already in the Stanford FS; only the per-run config is injected.
+  files['SimpleTest_config.h'] = makeConfig(nonce, hadMain);
+  return { files, sources, hasTests: true, nonce };
 }

@@ -4,6 +4,8 @@ export type EditReason = 'paste' | 'undo' | 'redo' | 'language';
 
 /** One textual change, positioned in the document produced by prior changes. */
 export type EditAtom = {
+  /** Workspace path of the edited file. */
+  file?: string;
   offset: number;
   deleted: number;
   inserted: string;
@@ -27,11 +29,13 @@ export function tryMerge(open: OpenEdit, next: EditAtom): OpenEdit | null {
   if (next.at < open.at) return null;
   if (next.at - open.at > EDIT_MERGE_MS) return null;
   if (open.reason !== next.reason) return null;
+  if (open.file !== next.file) return null;
   if ((open.language ?? undefined) !== (next.language ?? undefined)) return null;
   const composed = compose(open, next);
   if (!composed) return null;
   return {
     ...composed,
+    file: open.file,
     reason: open.reason,
     language: open.language,
     at: next.at,
