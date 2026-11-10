@@ -258,6 +258,17 @@ function randomNonce(): string {
   return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * One nonce per page load. It marks the runner's report lines so ordinary program output
+ * is never mistaken for them; the engine already drops output from earlier runs. Keeping it
+ * fixed means an unchanged program compiles to the same thing, so the engine can rerun its
+ * last build instead of compiling again.
+ */
+let pageNonce: string | undefined;
+function sessionNonce(): string {
+  return (pageNonce ??= randomNonce());
+}
+
 /** True when the student source declares at least one SimpleTest block. */
 export function sourceHasTests(source: string): boolean {
   return declarations('/main.c', source).length > 0;
@@ -286,7 +297,7 @@ export function prepareCppRun(
     return { files: { ...workspace }, sources, hasTests: false, nonce: '' };
   }
 
-  const nonce = randomNonce();
+  const nonce = sessionNonce();
   // The runner goes where main is (it calls it), or into the entry file when nothing defines main.
   const mainFile = paths.find((p) => hideUserMain(workspace[p]!).hadMain) ?? (paths.includes(entry) ? entry : paths[0]!);
   const files: Record<string, string> = { ...workspace };
