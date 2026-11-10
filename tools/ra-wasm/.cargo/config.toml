@@ -1,0 +1,5 @@
+[target.wasm32-unknown-unknown]
+# rust-analyzer's syntax/span crates drop large trees on a background thread
+# unless this cfg is set. wasm32-unknown-unknown cannot spawn threads, so the
+# first drop would panic.
+rustflags = ["--cfg", "no_salsa_async_drops"]
