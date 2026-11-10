@@ -193,7 +193,7 @@ export function useExecution({
         void loadStanfordArtifacts('run');
       }
       // A Run started during the warm-up releases IntelliSense when it finishes instead.
-      void ready.catch(() => undefined).finally(() => !isRunningRef.current && markRunnerReady());
+      void ready.catch(() => undefined).finally(() => !isRunningRef.current && markRunnerReady(lang));
     },
     [getEngine],
   );
@@ -649,7 +649,7 @@ export function useExecution({
         teardown();
         clearDebug();
         setIsRunning(false);
-        markRunnerReady();
+        markRunnerReady(lang);
       }
     },
     [

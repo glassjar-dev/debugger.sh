@@ -379,14 +379,17 @@ export default function CodeEditor(props: CodeEditorProps) {
   const focusRef = useRef(props.onFocus);
   focusRef.current = props.onFocus;
 
-  const [intellisenseOn, setIntellisenseOn] = useState(false);
+  // Each language's IntelliSense attaches once that language's run engine is warm.
+  const [intellisenseLang, setIntellisenseLang] = useState<Lang | null>(null);
+  const intellisenseOn = intellisenseLang === props.lang;
   useEffect(() => {
     let alive = true;
-    void runnerReady.then(() => alive && setIntellisenseOn(true));
+    const lang = props.lang;
+    void runnerReady(lang).then(() => alive && setIntellisenseLang(lang));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [props.lang]);
 
   const extensions = useMemo<Extension[]>(() => {
     // Attached once the run engine is warm, so loading it never slows Run down.

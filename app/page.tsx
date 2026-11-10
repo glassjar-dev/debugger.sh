@@ -119,7 +119,7 @@ export default function Page() {
   // Like the editors, this waits for the run engine to warm up before starting a language worker.
   useEffect(() => {
     let alive = true;
-    void runnerReady.then(() => alive && getLanguageService(lang).setFiles?.(ws.files));
+    void runnerReady(lang).then(() => alive && getLanguageService(lang).setFiles?.(ws.files));
     return () => {
       alive = false;
     };
