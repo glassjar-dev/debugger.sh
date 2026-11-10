@@ -132,6 +132,8 @@ export function useExecution({
   const enginesRef = useRef<Partial<Record<Lang, Engine>>>({});
   const engineInitRef = useRef<Partial<Record<Lang, Promise<Engine>>>>({});
   const priorRunRef = useRef<Promise<unknown> | null>(null);
+  /** The C++ compiler warm-up started on mount; the first C++ Run waits for it. */
+  const preparingRef = useRef<Promise<unknown> | null>(null);
   const isRunningRef = useRef(false);
   const dapSeqRef = useRef(1);
   const ioCleanupRef = useRef<(() => void) | null>(null);
@@ -163,10 +165,10 @@ export function useExecution({
     return pending;
   }, []);
 
-  // Warm the C++ toolchain HTTP cache + the common (non-debug) Stanford
-  // artifacts as soon as the IDE mounts. Debug archives load on demand.
+  // Start the C++ worker and compiler as soon as the IDE mounts, so the first Run only
+  // builds, and fetch the common (non-debug) Stanford artifacts. Debug archives load on demand.
   useEffect(() => {
-    void getEngine('c');
+    preparingRef.current = getEngine('c').then((engine) => engine.prepareCompiler());
     void loadStanfordArtifacts('run');
   }, [getEngine]);
 
@@ -434,6 +436,11 @@ export function useExecution({
         // A reused Engine returns the prior promise if run() is still settling.
         if (priorRunRef.current) {
           await priorRunRef.current.catch(() => undefined);
+        }
+        // An engine runs one job at a time, so let the C++ warm-up finish first.
+        if (lang === 'c' && preparingRef.current) {
+          await preparingRef.current.catch(() => undefined);
+          preparingRef.current = null;
         }
 
         const rt = await getEngine(lang);
