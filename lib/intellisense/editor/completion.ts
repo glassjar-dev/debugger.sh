@@ -5,6 +5,7 @@
  */
 
 import {
+  acceptCompletion,
   autocompletion,
   snippet,
   startCompletion,
@@ -13,7 +14,8 @@ import {
   type CompletionResult as CmResult,
 } from '@codemirror/autocomplete';
 import { syntaxTree } from '@codemirror/language';
-import type { EditorView } from '@codemirror/view';
+import { Prec } from '@codemirror/state';
+import { keymap, type EditorView } from '@codemirror/view';
 import type { CompletionItem } from '../types';
 import { docText, toOffset, toPosition, type Ctx } from './context';
 import { el, kindIcon, kindLabel, renderMarkdown } from './render';
@@ -114,18 +116,23 @@ function source(c: Ctx) {
 }
 
 export function completion(c: Ctx) {
-  return autocompletion({
-    override: [source(c)],
-    icons: false,
-    maxRenderedOptions: 80,
-    activateOnTypingDelay: 40,
-    tooltipClass: () => 'gj-ac',
-    optionClass: (option) => ((option as GjCompletion).item?.deprecated ? 'gj-deprecated' : ''),
-    addToOptions: [
-      {
-        render: (option) => kindIcon((option as GjCompletion).item?.kind ?? 'text'),
-        position: 20,
-      },
-    ],
-  });
+  return [
+    // Tab accepts the selected suggestion, as in VS Code. With no list open,
+    // acceptCompletion returns false and Tab falls through to indenting.
+    Prec.highest(keymap.of([{ key: 'Tab', run: acceptCompletion }])),
+    autocompletion({
+      override: [source(c)],
+      icons: false,
+      maxRenderedOptions: 80,
+      activateOnTypingDelay: 40,
+      tooltipClass: () => 'gj-ac',
+      optionClass: (option) => ((option as GjCompletion).item?.deprecated ? 'gj-deprecated' : ''),
+      addToOptions: [
+        {
+          render: (option) => kindIcon((option as GjCompletion).item?.kind ?? 'text'),
+          position: 20,
+        },
+      ],
+    }),
+  ];
 }
