@@ -13,8 +13,10 @@ import { tags as t } from '@lezer/highlight';
 import { LANGS, type Lang } from '@/components/constants';
 import { telemetryEditor } from '@/lib/telemetry/editor';
 import { intellisense } from '@/lib/intellisense/editor';
+import { documentService } from '@/lib/intellisense/documents';
 import { getLanguageService } from '@/lib/intellisense/services';
 import { runnerReady } from '@/lib/intellisense/runnerReady';
+import { extname } from '@/lib/workspace/paths';
 
 
 // ---------------------------------------------------------------------------
@@ -33,6 +35,17 @@ const LANG_INTELLISENSE: Record<Lang, { language: LRLanguage; fence: string }> =
   python: { language: pythonLanguage, fence: 'python' },
   rust: { language: rustLanguage, fence: 'rust' },
 };
+
+const MODE_BY_EXTENSION: Record<string, Lang> = {
+  c: 'c', cc: 'c', cp: 'c', cpp: 'c', cxx: 'c', 'c++': 'c', h: 'c', hh: 'c', hpp: 'c', hxx: 'c', inl: 'c',
+  py: 'python', pyi: 'python',
+  rs: 'rust',
+};
+
+/** Which language highlights `path`; null for plain text such as data files. */
+export function modeFor(path: string): Lang | null {
+  return MODE_BY_EXTENSION[extname(path)] ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -307,12 +320,17 @@ const stoppedLineHighlight = EditorView.decorations.compute([stoppedLineField], 
 // ---------------------------------------------------------------------------
 
 export type CodeEditorProps = {
+  /** The workspace's language. */
   lang: Lang;
+  /** The file this editor shows, like `lib/list.cpp`. */
+  path: string;
   value: string;
   onChange: (value: string) => void;
-  breakpoints: Set<number>;
+  breakpoints: ReadonlySet<number>;
   onToggleBreakpoint: (line: number) => void;
   stoppedLine: number | null;
+  /** The editor gained focus: this is now the file you're working in. */
+  onFocus?: () => void;
 };
 
 const BREAKPOINT_HINT_DONE = 'glassjar.breakpointHintDone';
@@ -331,7 +349,10 @@ const nudgeField = StateField.define<boolean>({
 
 export default function CodeEditor(props: CodeEditorProps) {
   const cmRef = useRef<ReactCodeMirrorRef>(null);
-  const breakpointsEnabled = LANGS[props.lang].debug;
+  const mode = modeFor(props.path);
+  // Only the workspace's own language gets breakpoints and IntelliSense (headers included).
+  const native = mode === props.lang;
+  const breakpointsEnabled = native && LANGS[props.lang].debug;
 
   // First-timers get a pulsing hint in the gutter until they set a breakpoint.
   const [nudge, setNudge] = useState(false);
@@ -355,6 +376,8 @@ export default function CodeEditor(props: CodeEditorProps) {
 
   const toggleRef = useRef(props.onToggleBreakpoint);
   toggleRef.current = props.onToggleBreakpoint;
+  const focusRef = useRef(props.onFocus);
+  focusRef.current = props.onFocus;
 
   const [intellisenseOn, setIntellisenseOn] = useState(false);
   useEffect(() => {
@@ -365,31 +388,38 @@ export default function CodeEditor(props: CodeEditorProps) {
     };
   }, []);
 
-  const extensions = useMemo<Extension[]>(
-    () => [
-      LANG_EXTENSIONS[props.lang](),
+  const extensions = useMemo<Extension[]>(() => {
+    // Attached once the run engine is warm, so loading it never slows Run down.
+    const service =
+      native && intellisenseOn ? documentService(getLanguageService(props.lang), props.path) : null;
+    return [
+      ...(mode ? [LANG_EXTENSIONS[mode]()] : []),
       breakpointsField,
       stoppedLineField,
       stoppedLineHighlight,
       makeLineGutter(toggleRef, breakpointsEnabled),
       nudgeField,
-      telemetryEditor(),
+      telemetryEditor(props.path),
       syntaxHighlighting(codeSyntax),
-      // Attached once the run engine is warm, so loading it never slows Run down.
-      ...(intellisenseOn
+      ...(service
         ? [
             intellisense({
-              service: getLanguageService(props.lang),
+              service,
               language: LANG_INTELLISENSE[props.lang].language,
               highlighter: codeSyntax,
               lang: LANG_INTELLISENSE[props.lang].fence,
             }),
           ]
         : []),
+      EditorView.domEventHandlers({
+        focus: () => {
+          service?.claim();
+          focusRef.current?.();
+        },
+      }),
       editorChrome,
-    ],
-    [props.lang, breakpointsEnabled, intellisenseOn],
-  );
+    ];
+  }, [props.lang, props.path, mode, native, breakpointsEnabled, intellisenseOn]);
 
   // React → CM sync. Include lang/value so we don't apply line state mid-switch.
   // Also runs from onCreateEditor: @uiw/react-codemirror creates the view a
@@ -418,11 +448,11 @@ export default function CodeEditor(props: CodeEditorProps) {
   useEffect(() => {
     const view = cmRef.current?.view;
     if (view) syncRef.current(view);
-  }, [props.lang, props.value, props.breakpoints, props.stoppedLine, showNudge]);
+  }, [props.path, props.value, props.breakpoints, props.stoppedLine, showNudge]);
 
   return (
     <CodeMirror
-      key={props.lang}
+      key={`${props.lang}:${props.path}`}
       ref={cmRef}
       value={props.value}
       onChange={props.onChange}

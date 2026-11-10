@@ -150,4 +150,8 @@ export interface LanguageService {
   /** Characters that open completion as soon as they are typed. */
   readonly triggerCharacters: readonly string[];
   readonly signatureTriggers: readonly string[];
+  /** Workspace path (like `lib/list.cpp`) of the document `update` and requests refer to. */
+  setActive?(path: string): void;
+  /** Every file in the workspace, so includes, imports and `mod`s resolve. */
+  setFiles?(files: Readonly<Record<string, string>>): void;
 }

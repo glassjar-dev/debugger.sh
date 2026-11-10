@@ -37,8 +37,7 @@ import {
 } from "./ops";
 import { TabBar, insertIndexAtPointer, toMoveIndex } from "./TabBar";
 import {
-  PANE_IDS,
-  PANE_LABELS,
+  type BuiltinPane,
   type DockNode,
   type DockState,
   type DropEdge,
@@ -48,13 +47,17 @@ import {
   closedPanes,
   collectGroups,
   isTabGroup,
+  paneLabel,
   visiblePanes,
 } from "./types";
 
 export type DockWorkspaceProps = {
-  panes: Record<PaneId, ReactNode>;
+  /** Content for every pane that may appear: tool panes plus one per open file. */
+  panes: Partial<Record<PaneId, ReactNode>>;
   layout: DockState;
   onLayoutChange: (layout: DockState) => void;
+  /** A tab was chosen or dropped into a group; the page opens new files where you were working. */
+  onActivate?: (pane: PaneId, groupId: string) => void;
 };
 
 type DragPane = { pane: PaneId; groupId: string };
@@ -94,6 +97,7 @@ export default function DockWorkspace({
   panes,
   layout,
   onLayoutChange,
+  onActivate,
 }: DockWorkspaceProps) {
   const [drag, setDrag] = useState<DragPane | null>(null);
   const [hover, setHover] = useState<HoverTarget | null>(null);
@@ -109,6 +113,8 @@ export default function DockWorkspace({
   stateRef.current = layout;
   const onLayoutChangeRef = useRef(onLayoutChange);
   onLayoutChangeRef.current = onLayoutChange;
+  const onActivateRef = useRef(onActivate);
+  onActivateRef.current = onActivate;
 
   useEffect(() => {
     if (!drag) return;
@@ -260,7 +266,10 @@ export default function DockWorkspace({
 
       const s = stateRef.current;
       if (edge !== "center") {
-        commit(splitLeaf(s, groupId, active.pane, edge));
+        const next = splitLeaf(s, groupId, active.pane, edge);
+        commit(next);
+        const landed = collectGroups(next.root).find((g) => g.tabs.includes(active.pane));
+        if (landed) onActivateRef.current?.(active.pane, landed.id);
         return;
       }
 
@@ -270,6 +279,7 @@ export default function DockWorkspace({
           ? toMoveIndex(group.tabs, active.pane, insertIndex)
           : undefined;
       commit(moveToGroup(s, active.pane, groupId, index));
+      onActivateRef.current?.(active.pane, groupId);
     },
     [drag, hover, commit]
   );
@@ -302,9 +312,10 @@ export default function DockWorkspace({
           registerLeaf={registerLeaf}
           registerBar={registerBar}
           registerHost={registerHost}
-          onSelect={(groupId, pane) =>
-            commit(setActive(stateRef.current, groupId, pane))
-          }
+          onSelect={(groupId, pane) => {
+            commit(setActive(stateRef.current, groupId, pane));
+            onActivateRef.current?.(pane, groupId);
+          }}
           onClose={(groupId, pane) =>
             commit(closeTab(stateRef.current, groupId, pane))
           }
@@ -322,7 +333,7 @@ export default function DockWorkspace({
           dragging={Boolean(drag)}
         />
         <div ref={setHoldEl} className="ide-pane-hold" aria-hidden />
-        {PANE_IDS.map((pane) => {
+        {(Object.keys(panes) as PaneId[]).map((pane) => {
           const host = activeHosts.current.get(pane) ?? holdEl;
           return host ? createPortal(panes[pane], host, pane) : null;
         })}
@@ -337,7 +348,7 @@ export default function DockWorkspace({
       >
         {drag ? (
           <div className="ide-tab ide-tab-overlay" data-active="true">
-            <span className="ide-tab-label">{PANE_LABELS[drag.pane]}</span>
+            <span className="ide-tab-label">{paneLabel(drag.pane)}</span>
           </div>
         ) : null}
       </DragOverlay>
@@ -411,7 +422,7 @@ function DockNodeView({
   onSplitSizes,
 }: {
   node: DockNode;
-  closed: PaneId[];
+  closed: BuiltinPane[];
   visibleCount: number;
   hover: HoverTarget | null;
   registerBody: (groupId: string, el: HTMLElement | null) => void;
@@ -476,7 +487,7 @@ function SplitView({
   onSplitSizes,
 }: {
   split: SplitNode;
-  closed: PaneId[];
+  closed: BuiltinPane[];
   visibleCount: number;
   hover: HoverTarget | null;
   registerBody: (groupId: string, el: HTMLElement | null) => void;
@@ -548,7 +559,7 @@ function LeafGroup({
   onOpen,
 }: {
   group: TabGroup;
-  closed: PaneId[];
+  closed: BuiltinPane[];
   canClose: boolean;
   insertIndex: number | null;
   registerBody: (groupId: string, el: HTMLElement | null) => void;

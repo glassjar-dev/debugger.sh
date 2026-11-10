@@ -87,6 +87,12 @@ class WorkerService implements LanguageService {
   update(text: string, version: number) {
     this.worker.postMessage({ type: 'update', text, version });
   }
+  setActive(path: string) {
+    this.worker.postMessage({ type: 'active', path });
+  }
+  setFiles(files: Readonly<Record<string, string>>) {
+    this.worker.postMessage({ type: 'files', files });
+  }
   complete(text: string, pos: Position) {
     return this.call<CompletionResult>('complete', { text, pos });
   }
@@ -117,7 +123,7 @@ class WorkerService implements LanguageService {
 
 const PYRIGHT_URL = '/intellisense/pyright.worker.js';
 const ROOT = '/src/';
-const DOC_URI = `file://${ROOT}main.py`;
+const uriOf = (path: string) => `file://${ROOT}${path}`;
 
 type Rpc = { jsonrpc: '2.0'; id?: number; method?: string; params?: unknown; result?: unknown; error?: { message: string } };
 
@@ -147,10 +153,14 @@ class PyrightService implements LanguageService {
   private diagnostics = new Emitter<[number, Diagnostic[]]>(false);
   private status = new Emitter<[ServiceStatus]>();
   private ready: Promise<void>;
-  private text = '';
-  private version = 0;
-  /** LSP version -> our editor version, for matching published diagnostics. */
-  private versions = new Map<number, number>();
+  /** The workspace file requests and diagnostics are about. */
+  private active = 'main.py';
+  /** Every workspace module the server has open, with its LSP version. */
+  private docs = new Map<string, { text: string; version: number }>();
+  /** `path@lspVersion` -> our editor version, for matching published diagnostics. */
+  private versions = new Map<string, number>();
+  /** Last published diagnostics per file, shown when you switch to it. */
+  private published = new Map<string, Diagnostic[]>();
 
   constructor() {
     this.status.emit({ state: 'loading', detail: 'Loading basedpyright' });
@@ -210,9 +220,13 @@ class PyrightService implements LanguageService {
     }
     if (msg.method === 'textDocument/publishDiagnostics') {
       const params = msg.params as { uri: string; version?: number; diagnostics: LspDiagnostic[] };
-      if (params.uri !== DOC_URI) return;
-      const version = this.versions.get(params.version ?? this.version) ?? -1;
-      this.diagnostics.emit(version, params.diagnostics.map(toDiagnostic));
+      const path = params.uri.startsWith(`file://${ROOT}`) ? params.uri.slice(`file://${ROOT}`.length) : null;
+      if (!path || !this.docs.has(path)) return;
+      const list = params.diagnostics.map(toDiagnostic);
+      this.published.set(path, list);
+      if (path !== this.active) return;
+      const version = this.versions.get(`${path}@${params.version ?? this.docs.get(path)!.version}`) ?? -1;
+      this.diagnostics.emit(version, list);
     }
   }
 
@@ -236,7 +250,6 @@ class PyrightService implements LanguageService {
       },
       initializationOptions: {
         files: {
-          [`${ROOT}main.py`]: this.text,
           // The engine runs CPython 3.11. "standard" catches real type errors
           // without basedpyright's stricter "recommended" noise.
           [`${ROOT}pyrightconfig.json`]: JSON.stringify({ pythonVersion: '3.11', typeCheckingMode: 'standard' }),
@@ -245,9 +258,6 @@ class PyrightService implements LanguageService {
     });
     this.notify('initialized', {});
     this.notify('workspace/didChangeConfiguration', { settings: {} });
-    this.notify('textDocument/didOpen', {
-      textDocument: { uri: DOC_URI, languageId: 'python', version: ++this.version, text: this.text },
-    });
     // The first member completion makes basedpyright evaluate builtins (~1.5 s).
     // Do it now in a scratch document, off the user's clock.
     const warm = `file://${ROOT}__warmup__.py`;
@@ -260,33 +270,65 @@ class PyrightService implements LanguageService {
     ]).then(() => this.notify('textDocument/didClose', { textDocument: { uri: warm } }));
   }
 
-  /** Brings the server's copy of the document up to `text`. */
+  /**
+   * Bring the server's copy of `path` up to `text`, opening it the first time.
+   * `editorVersion` ties the diagnostics this produces back to the editor.
+   */
+  private put(path: string, text: string, editorVersion?: number) {
+    const uri = uriOf(path);
+    const doc = this.docs.get(path);
+    if (!doc) {
+      // Registers the file so other modules can `import` it, then supplies its text.
+      this.notify('pyright/createFile', { uri });
+      this.docs.set(path, { text, version: 1 });
+      if (editorVersion !== undefined) this.versions.set(`${path}@1`, editorVersion);
+      this.notify('textDocument/didOpen', { textDocument: { uri, languageId: 'python', version: 1, text } });
+      return;
+    }
+    if (doc.text === text) return;
+    doc.text = text;
+    doc.version++;
+    if (editorVersion !== undefined) this.versions.set(`${path}@${doc.version}`, editorVersion);
+    this.notify('textDocument/didChange', { textDocument: { uri, version: doc.version }, contentChanges: [{ text }] });
+  }
+
+  /** Brings the server's copy of the active document up to `text`. */
   private async sync(text: string) {
     await this.ready;
-    if (text === this.text) return;
-    this.text = text;
-    this.notify('textDocument/didChange', {
-      textDocument: { uri: DOC_URI, version: ++this.version },
-      contentChanges: [{ text }],
-    });
+    this.put(this.active, text);
   }
 
   update(text: string, version: number) {
+    void this.ready.then(() => this.put(this.active, text, version));
+  }
+
+  setActive(path: string) {
+    if (path === this.active) return;
+    this.active = path;
+    const known = this.published.get(path);
+    if (known) this.diagnostics.emit(-1, known);
+  }
+
+  setFiles(files: Readonly<Record<string, string>>) {
     void this.ready.then(() => {
-      if (text === this.text) return;
-      this.text = text;
-      this.versions.set(++this.version, version);
-      this.notify('textDocument/didChange', {
-        textDocument: { uri: DOC_URI, version: this.version },
-        contentChanges: [{ text }],
-      });
+      for (const [path, text] of Object.entries(files)) {
+        // The active file is owned by `update`, which carries the editor's version.
+        if (path.endsWith('.py') && path !== this.active) this.put(path, text);
+      }
+      for (const path of [...this.docs.keys()]) {
+        if (Object.hasOwn(files, path)) continue;
+        this.notify('textDocument/didClose', { textDocument: { uri: uriOf(path) } });
+        this.notify('pyright/deleteFile', { uri: uriOf(path) });
+        this.docs.delete(path);
+        this.published.delete(path);
+      }
     });
   }
 
   async complete(text: string, pos: Position): Promise<CompletionResult | null> {
     await this.sync(text);
     const result = await this.request<{ items: LspCompletion[] } | LspCompletion[]>('textDocument/completion', {
-      textDocument: { uri: DOC_URI },
+      textDocument: { uri: uriOf(this.active) },
       position: pos,
     });
     const raw = Array.isArray(result) ? result : result?.items;
@@ -332,7 +374,7 @@ class PyrightService implements LanguageService {
   async hover(text: string, pos: Position): Promise<HoverResult | null> {
     await this.sync(text);
     const h = await this.request<{ contents: LspMarkup; range?: Range }>('textDocument/hover', {
-      textDocument: { uri: DOC_URI },
+      textDocument: { uri: uriOf(this.active) },
       position: pos,
     });
     const md = markupText(h?.contents);
@@ -352,7 +394,7 @@ class PyrightService implements LanguageService {
   async signature(text: string, pos: Position): Promise<SignatureResult | null> {
     await this.sync(text);
     const s = await this.request<LspSignatureHelp>('textDocument/signatureHelp', {
-      textDocument: { uri: DOC_URI },
+      textDocument: { uri: uriOf(this.active) },
       position: pos,
     });
     if (!s?.signatures?.length) return null;
@@ -376,7 +418,7 @@ class PyrightService implements LanguageService {
     await this.sync(text);
     const r = await this.request<Array<{ uri?: string; targetUri?: string; range?: Range; targetSelectionRange?: Range }>>(
       'textDocument/definition',
-      { textDocument: { uri: DOC_URI }, position: pos },
+      { textDocument: { uri: uriOf(this.active) }, position: pos },
     );
     if (!r?.length) return null;
     const out: DefinitionTarget[] = [];
@@ -384,7 +426,7 @@ class PyrightService implements LanguageService {
       const uri = loc.targetUri ?? loc.uri;
       const range = loc.targetSelectionRange ?? loc.range;
       if (!uri || !range) continue;
-      if (uri === DOC_URI) out.push({ kind: 'local', range });
+      if (uri === uriOf(this.active)) out.push({ kind: 'local', range });
       else {
         // Stub files live in the worker; show where the definition is.
         const path = decodeURIComponent(uri.replace(/^file:\/\//, '')).replace(/^.*typeshed-fallback\//, '');

@@ -14,8 +14,8 @@ function reasonFor(userEvent: string | undefined): EditReason | undefined {
   return undefined;
 }
 
-/** Records document transactions. Merging and upload live in the telemetry client. */
-export function telemetryEditor() {
+/** Records document transactions for `file`. Merging and upload live in the telemetry client. */
+export function telemetryEditor(file: string) {
   return EditorView.updateListener.of((update) => {
     if (!update.docChanged) return;
     try {
@@ -27,6 +27,7 @@ export function telemetryEditor() {
           const text = inserted.toString();
           const deleted = to - from;
           Telemetry.log('edit', {
+            file,
             offset: from + delta,
             deleted: deleted > 0 ? deleted : undefined,
             inserted: text.length > 0 ? text : undefined,

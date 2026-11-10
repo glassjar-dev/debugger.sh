@@ -1,6 +1,8 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { PanelLeft } from 'lucide-react';
+import { toast } from 'sonner';
 
 import CodeEditor from '@/components/CodeEditor';
 import { LANGS, type Lang } from '@/components/constants';
@@ -11,89 +13,260 @@ import { RunStopButton } from '@/components/SourceActions';
 import Terminal, { type TerminalHandle } from '@/components/Terminal';
 import { TestsPanel } from '@/components/TestsPanel';
 import { VariablesPanel } from '@/components/VariablesPanel';
-import { activatePane } from '@/components/dock/ops';
+import { Explorer, type FileOps } from '@/components/files/Explorer';
+import { QuickOpen } from '@/components/files/QuickOpen';
+import { activatePane, closeFiles, openFile, renameFiles } from '@/components/dock/ops';
 import {
   adoptDockIds,
   defaultDockState,
+  filePane,
+  openFiles as openFilesIn,
+  paneFile,
+  parseDockState,
   stackedDockState,
   type DockState,
   type PaneId,
 } from '@/components/dock/types';
-import { useExecution } from '@/hooks/useExecution';
+import { useExecution, type Breakpoints } from '@/hooks/useExecution';
+import { getLanguageService } from '@/lib/intellisense/services';
+import { runnerReady } from '@/lib/intellisense/runnerReady';
 import { getShare } from '@/lib/share/api';
 import type { WorkspaceState } from '@/lib/share/types';
 import { installTelemetry, Telemetry } from '@/lib/telemetry/client';
+import {
+  createFile,
+  createFolder,
+  deletePath,
+  entryFile,
+  movedPath,
+  renamePath,
+  starterText,
+  writeFile,
+  type Workspace,
+} from '@/lib/workspace/model';
+import { basename, isWithin, normalizePath } from '@/lib/workspace/paths';
+import { useWorkspace, useWorkspaceShape, workspaceStore } from '@/lib/workspace/store';
 
-function initialSources(): Record<Lang, string> {
-  return Object.fromEntries(
-    Object.entries(LANGS).map(([lang, cfg]) => [lang, cfg.defaultCode]),
-  ) as Record<Lang, string>;
+const LANG_IDS = Object.keys(LANGS) as Lang[];
+const EXPLORER_PREF = 'glassjar.explorerOpen';
+/** Open tabs and splits per language, saved next to the workspaces. */
+const LAYOUTS_KEY = 'glassjar.layouts.v1';
+
+function loadLayouts(): Partial<Record<Lang, DockState>> {
+  try {
+    const saved = JSON.parse(localStorage.getItem(LAYOUTS_KEY) ?? '{}') as Record<string, unknown>;
+    const out: Partial<Record<Lang, DockState>> = {};
+    for (const l of LANG_IDS) {
+      const parsed = parseDockState(saved[l], entryFile(l));
+      if (parsed) out[l] = parsed;
+    }
+    return out;
+  } catch {
+    return {};
+  }
 }
 
-function initialBreakpoints(): Record<Lang, Set<number>> {
-  return Object.fromEntries(
-    Object.keys(LANGS).map((lang) => [lang, new Set<number>()]),
-  ) as Record<Lang, Set<number>>;
+function perLang<T>(make: (lang: Lang) => T): Record<Lang, T> {
+  return Object.fromEntries(LANG_IDS.map((l) => [l, make(l)])) as Record<Lang, T>;
 }
 
 export default function Page() {
-  const [lang, setLang] = useState<Lang>('c');
-  const [sources, setSources] = useState<Record<Lang, string>>(initialSources);
-  const [breakpointsByLang, setBreakpointsByLang] =
-    useState<Record<Lang, Set<number>>>(initialBreakpoints);
-  const [layout, setLayout] = useState<DockState>(defaultDockState);
+  const [lang, setLang] = useState<Lang>('python');
+  const entry = entryFile(lang);
+  const ws = useWorkspace(lang);
+  const shape = useWorkspaceShape(lang);
+
+  // Each language keeps its own arrangement of tabs and splits.
+  const [layouts, setLayouts] = useState<Record<Lang, DockState>>(() => perLang((l) => defaultDockState(entryFile(l))));
+  const layout = layouts[lang];
+  const setLayout = useCallback(
+    (update: DockState | ((prev: DockState) => DockState)) =>
+      setLayouts((prev) => {
+        const next = typeof update === 'function' ? update(prev[lang]) : update;
+        return next === prev[lang] ? prev : { ...prev, [lang]: next };
+      }),
+    [lang],
+  );
   const [dockKey, setDockKey] = useState(0);
+
+  const [breakpointsByLang, setBreakpointsByLang] = useState<Record<Lang, Breakpoints>>(() => perLang(() => new Map()));
+  const breakpoints = breakpointsByLang[lang];
+  const breakpointsRef = useRef(breakpoints);
+  breakpointsRef.current = breakpoints;
+
+  // The file you're in: follows editor focus and tab clicks.
+  const [activeByLang, setActiveByLang] = useState<Record<Lang, string>>(() => perLang(entryFile));
+  const activeFile = shape.paths.includes(activeByLang[lang]) ? activeByLang[lang] : entry;
+  const lastGroupRef = useRef<string | null>(null);
+
   const [shareReady, setShareReady] = useState(false);
+  // Off while a share is open, like the workspace store.
+  const persistLayoutsRef = useRef(false);
+  const [explorerOpen, setExplorerOpen] = useState(true);
+  const [quickOpen, setQuickOpen] = useState(false);
   const terminalRef = useRef<TerminalHandle | null>(null);
   // Stable element identity so the xterm instance is not remounted on each IDE render.
   const terminal = useMemo(() => <Terminal ref={terminalRef} />, []);
   const exec = useExecution({ terminalRef });
 
-  const code = sources[lang];
-  const breakpoints = breakpointsByLang[lang];
-  const breakpointsRef = useRef(breakpoints);
-  breakpointsRef.current = breakpoints;
+  // Warm the engine for whichever language is on screen, starting with the default.
+  const { warm } = exec;
+  useEffect(() => warm(lang), [warm, lang]);
 
-  const setCode = useCallback(
-    (next: string) => setSources((prev) => ({ ...prev, [lang]: next })),
-    [lang],
+  const setActive = useCallback((path: string) => setActiveByLang((prev) => (prev[lang] === path ? prev : { ...prev, [lang]: path })), [lang]);
+
+  // IntelliSense backends see the whole workspace, so includes, imports and mods resolve.
+  // Like the editors, this waits for the run engine to warm up before starting a language worker.
+  useEffect(() => {
+    let alive = true;
+    void runnerReady.then(() => alive && getLanguageService(lang).setFiles?.(ws.files));
+    return () => {
+      alive = false;
+    };
+  }, [lang, ws.files]);
+
+  const open = useCallback(
+    (path: string) => {
+      setLayout((prev) => openFile(prev, path, lastGroupRef.current));
+      setActive(path);
+    },
+    [setLayout, setActive],
   );
 
   const changeLanguage = useCallback(
     (next: Lang) => {
       if (next === lang) return;
+      const from = workspaceStore.get(lang).files[entryFile(lang)] ?? '';
       Telemetry.log('edit', {
+        file: entryFile(next),
         offset: 0,
-        deleted: sources[lang].length,
-        inserted: sources[next],
+        deleted: from.length,
+        inserted: workspaceStore.get(next).files[entryFile(next)] ?? '',
         reason: 'language',
         language: next,
       });
+      lastGroupRef.current = null;
       setLang(next);
     },
-    [lang, sources],
+    [lang],
+  );
+
+  const setCode = useCallback(
+    (path: string, text: string) => workspaceStore.set(lang, writeFile(workspaceStore.get(lang), path, text)),
+    [lang],
   );
 
   const toggleBreakpoint = useCallback(
-    (line: number) => {
+    (path: string, line: number) => {
       if (!LANGS[lang].debug) return;
       const current = breakpointsRef.current;
-      const added = !current.has(line);
-      const next = new Set(current);
-      if (added) next.add(line);
-      else next.delete(line);
+      const lines = new Set(current.get(path));
+      const added = !lines.has(line);
+      if (added) lines.add(line);
+      else lines.delete(line);
+      const next = new Map(current);
+      if (lines.size) next.set(path, lines);
+      else next.delete(path);
       breakpointsRef.current = next;
-      Telemetry.log('debug_breakpoint', { line, added });
+      Telemetry.log('debug_breakpoint', { file: path, line, added });
       setBreakpointsByLang((prev) => ({ ...prev, [lang]: next }));
       exec.applyBreakpoints(next);
     },
     [exec, lang],
   );
 
-  const onLayoutChange = useCallback((next: DockState) => {
-    setLayout(next);
-    Telemetry.log('layout_changed', { layout: next });
-  }, []);
+  // ---------------------------------------------------------------------------
+  // File operations: the workspace, tabs and breakpoints move together.
+  // ---------------------------------------------------------------------------
+
+  const commit = useCallback(
+    (next: Workspace, after?: () => void) => {
+      workspaceStore.set(lang, next);
+      after?.();
+    },
+    [lang],
+  );
+
+  const ops = useMemo<FileOps>(
+    () => ({
+      create(path, kind) {
+        const current = workspaceStore.get(lang);
+        const result = kind === 'file' ? createFile(current, path, starterText(path)) : createFolder(current, path);
+        if (!result.ok) return result.error;
+        commit(result.ws, () => {
+          if (kind === 'file') open(normalizePath(path)!);
+        });
+        return null;
+      },
+      rename(from, to) {
+        const current = workspaceStore.get(lang);
+        const result = renamePath(current, from, to, entryFile(lang));
+        if (!result.ok) {
+          toast.error(result.error);
+          return result.error;
+        }
+        const dest = normalizePath(to)!;
+        commit(result.ws, () => {
+          const move = (p: string) => movedPath(p, from, dest);
+          setLayout((prev) => renameFiles(prev, move));
+          setBreakpointsByLang((prev) => {
+            const next = new Map<string, ReadonlySet<number>>();
+            for (const [p, lines] of prev[lang]) next.set(move(p), lines);
+            return { ...prev, [lang]: next };
+          });
+          setActiveByLang((prev) => ({ ...prev, [lang]: move(prev[lang]) }));
+        });
+        return null;
+      },
+      remove(path) {
+        const before = workspaceStore.get(lang);
+        const result = deletePath(before, path, entryFile(lang));
+        if (!result.ok) {
+          toast.error(result.error);
+          return result.error;
+        }
+        const layoutBefore = layouts[lang];
+        const breakpointsBefore = breakpointsRef.current;
+        commit(result.ws, () => {
+          setLayout((prev) => closeFiles(prev, (p) => isWithin(p, path), entryFile(lang)));
+          setBreakpointsByLang((prev) => {
+            const next = new Map([...prev[lang]].filter(([p]) => !isWithin(p, path)));
+            return { ...prev, [lang]: next };
+          });
+        });
+        toast(`Deleted ${basename(path)}`, {
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              workspaceStore.set(lang, before);
+              setLayouts((prev) => ({ ...prev, [lang]: layoutBefore }));
+              setBreakpointsByLang((prev) => ({ ...prev, [lang]: breakpointsBefore }));
+            },
+          },
+        });
+        return null;
+      },
+    }),
+    [lang, commit, open, setLayout, layouts],
+  );
+
+  const onLayoutChange = useCallback(
+    (next: DockState) => {
+      setLayout(next);
+      Telemetry.log('layout_changed', { layout: next });
+    },
+    [setLayout],
+  );
+
+  const onActivate = useCallback(
+    (pane: PaneId, groupId: string) => {
+      const file = paneFile(pane);
+      if (!file) return;
+      lastGroupRef.current = groupId;
+      setActive(file);
+    },
+    [setActive],
+  );
 
   /** Bring a pane forward for the user, e.g. Terminal when a run starts. */
   const reveal = useCallback(
@@ -103,14 +276,14 @@ export default function Page() {
         if (next !== prev) Telemetry.log('layout_changed', { layout: next });
         return next;
       }),
-    [],
+    [setLayout],
   );
 
-  const debugging = LANGS[lang].debug && breakpoints.size > 0;
+  const debugging = LANGS[lang].debug && [...breakpoints.values()].some((lines) => lines.size > 0);
   const runCode = useCallback(() => {
     reveal('output');
-    void exec.run(code, breakpoints, lang);
-  }, [reveal, exec, code, breakpoints, lang]);
+    void exec.run(workspaceStore.get(lang).files, breakpointsRef.current, lang);
+  }, [reveal, exec, lang]);
 
   // Show the pane that has news: tests once a run reports some, variables when paused.
   const hasTests = (exec.testState?.tests.length ?? 0) > 0;
@@ -120,28 +293,67 @@ export default function Page() {
   useEffect(() => {
     if (exec.isPaused) reveal('variables');
   }, [exec.isPaused, reveal]);
+  // Pausing in another file brings it forward.
+  const stoppedPath = exec.stopped?.path;
+  useEffect(() => {
+    if (stoppedPath) open(stoppedPath);
+  }, [stoppedPath, open]);
 
-  // Cmd/Ctrl+Enter: run, or continue while paused. Capture phase so the editor
-  // doesn't also insert a blank line.
-  const shortcutRef = useRef<() => void>(() => {});
-  shortcutRef.current = () => {
-    if (exec.isPaused) exec.resume();
-    else if (!exec.isRunning && shareReady) runCode();
+  // Keyboard: Cmd/Ctrl+Enter runs or continues, +P opens files, +B toggles the explorer.
+  // Capture phase so the editor doesn't also handle them.
+  const shortcutRef = useRef<(e: KeyboardEvent) => boolean>(() => false);
+  shortcutRef.current = (event) => {
+    const mod = event.metaKey || event.ctrlKey;
+    if (!mod || event.altKey || event.repeat) return false;
+    if (event.key === 'Enter') {
+      if (exec.isPaused) exec.resume();
+      else if (!exec.isRunning && shareReady) runCode();
+      return true;
+    }
+    if (event.key.toLowerCase() === 'p' && !event.shiftKey) {
+      setQuickOpen(true);
+      return true;
+    }
+    if (event.key.toLowerCase() === 'b' && !event.shiftKey) {
+      setExplorerOpen((v) => !v);
+      return true;
+    }
+    return false;
   };
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || event.repeat) return;
+      if (!shortcutRef.current(event)) return;
       event.preventDefault();
       event.stopPropagation();
-      shortcutRef.current();
     };
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, []);
 
+  // Remember whether the explorer is open; phones start with it closed.
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(EXPLORER_PREF);
+      if (saved != null) setExplorerOpen(saved === '1');
+      else if (window.matchMedia('(max-width: 760px)').matches) setExplorerOpen(false);
+    } catch {
+      // Storage blocked: keep the default.
+    }
+  }, []);
+  const toggleExplorer = useCallback(() => {
+    setExplorerOpen((v) => {
+      try {
+        localStorage.setItem(EXPLORER_PREF, v ? '0' : '1');
+      } catch {
+        // Storage blocked: the choice lasts for this visit.
+      }
+      return !v;
+    });
+  }, []);
+
   const getShareState = useCallback(
-    (): WorkspaceState => ({ lang, code, layout }),
-    [lang, code, layout],
+    (): WorkspaceState => ({ lang, files: { ...ws.files }, ...(ws.dirs.length ? { dirs: [...ws.dirs] } : {}), layout }),
+    [lang, ws, layout],
   );
 
   useLayoutEffect(() => installTelemetry(), []);
@@ -149,9 +361,11 @@ export default function Page() {
   useLayoutEffect(() => {
     if (!shareReady) return;
     const shareId = window.location.pathname.replace(/^\/+|\/+$/g, '');
+    const current = workspaceStore.get(lang);
     Telemetry.startSession({
       language: lang,
-      code,
+      code: current.files[entryFile(lang)] ?? '',
+      files: { ...current.files },
       layout,
       shareId: shareId || undefined,
     });
@@ -162,27 +376,30 @@ export default function Page() {
   useEffect(() => {
     // Side-by-side panes don't fit a phone; stack them unless a share brings its own layout.
     const narrow = window.matchMedia('(max-width: 760px)').matches;
-    if (narrow) {
-      setLayout(stackedDockState());
-      setDockKey((k) => k + 1);
-    }
-
     const shareId = window.location.pathname.replace(/^\/+|\/+$/g, '');
+    const saved = shareId ? {} : loadLayouts();
+    setLayouts(perLang((l) => saved[l] ?? (narrow ? stackedDockState(entryFile(l)) : defaultDockState(entryFile(l)))));
+    for (const layout of Object.values(saved)) adoptDockIds(layout);
+    setDockKey((k) => k + 1);
+
     if (!shareId) {
+      persistLayoutsRef.current = true;
       setShareReady(true);
       return;
     }
 
+    // A share opens as its own workspace and never overwrites the one saved on this device.
+    workspaceStore.setPersistence(false);
     let cancelled = false;
     void (async () => {
       try {
         const state = await getShare(shareId);
         if (cancelled || !state) return;
+        workspaceStore.set(state.lang, { files: state.files, dirs: state.dirs ?? [] });
         setLang(state.lang);
-        setSources((prev) => ({ ...prev, [state.lang]: state.code }));
         if (state.layout) {
           adoptDockIds(state.layout);
-          setLayout(state.layout);
+          setLayouts((prev) => ({ ...prev, [state.lang]: state.layout! }));
           setDockKey((k) => k + 1);
         }
       } catch (err) {
@@ -197,63 +414,117 @@ export default function Page() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!persistLayoutsRef.current) return;
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(LAYOUTS_KEY, JSON.stringify(layouts));
+      } catch {
+        // Storage blocked: layouts last for this visit.
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [layouts]);
+
+  // A layout from storage or a share may name files that no longer exist. Ask the store
+  // itself: during hydration the hook still returns the default workspace.
+  useEffect(() => {
+    const files = workspaceStore.get(lang).files;
+    setLayout((prev) => closeFiles(prev, (p) => !Object.hasOwn(files, p), entry));
+  }, [shape, entry, lang, setLayout]);
+
+  const open_ = useMemo(() => openFilesIn(layout), [layout]);
+  const openSet = useMemo(() => new Set(open_), [open_]);
+
+  const panes: Partial<Record<PaneId, React.ReactNode>> = {
+    variables: (
+      <VariablesPanel
+        canDebug={LANGS[lang].debug}
+        isRunning={exec.isRunning}
+        hasBreakpoints={debugging}
+        frames={exec.frames}
+        selectedFrameId={exec.selectedFrameId}
+        onSelectFrame={exec.selectFrame}
+        scopes={exec.scopes}
+        expandVariable={exec.expandVariable}
+        isPaused={exec.isPaused}
+        debugControls={{
+          onContinue: exec.resume,
+          onStepOver: exec.stepOver,
+          onStepIn: exec.stepIn,
+          onStepOut: exec.stepOut,
+        }}
+      />
+    ),
+    output: terminal,
+    tests: <TestsPanel lang={lang} state={exec.testState} isRunning={exec.isRunning} />,
+  };
+  for (const path of open_) {
+    if (!Object.hasOwn(ws.files, path)) continue;
+    panes[filePane(path)] = shareReady ? (
+      <CodeEditor
+        lang={lang}
+        path={path}
+        value={ws.files[path]!}
+        onChange={(text) => setCode(path, text)}
+        breakpoints={breakpoints.get(path) ?? EMPTY}
+        onToggleBreakpoint={(line) => toggleBreakpoint(path, line)}
+        stoppedLine={exec.stopped?.path === path ? exec.stopped.line : null}
+        onFocus={() => setActive(path)}
+      />
+    ) : (
+      <div />
+    );
+  }
+
+  const recent = useMemo(() => [activeFile, ...open_.filter((p) => p !== activeFile)], [activeFile, open_]);
+
   return (
     <main className="ide-page" data-loading={shareReady ? undefined : 'true'}>
       <header className="ide-topbar">
+        <button
+          type="button"
+          className="gj-icon-btn gj-sidebar-toggle"
+          aria-label="Toggle files"
+          aria-pressed={explorerOpen}
+          title="Files (⌘B / Ctrl+B)"
+          onClick={toggleExplorer}
+        >
+          <PanelLeft size={16} />
+        </button>
         <Logo />
         <LanguageSelect value={lang} onChange={changeLanguage} disabled={exec.isRunning} />
         <div className="ide-topbar-spacer" />
-        <RunStatus isRunning={exec.isRunning} isPaused={exec.isPaused} line={exec.stoppedLine} />
+        <RunStatus
+          isRunning={exec.isRunning}
+          isPaused={exec.isPaused}
+          stopped={exec.stopped}
+          multiFile={shape.paths.length > 1}
+        />
         <div className="ide-main-dock">
           <ShareButton getState={getShareState} />
-          <RunStopButton
-            isRunning={exec.isRunning}
-            debug={debugging}
-            onRun={runCode}
-            onStop={exec.stop}
-          />
+          <RunStopButton isRunning={exec.isRunning} debug={debugging} onRun={runCode} onStop={exec.stop} />
         </div>
       </header>
-      <ResizableWorkspace
-        key={dockKey}
-        layout={layout}
-        onLayoutChange={onLayoutChange}
-        panes={{
-          editor: shareReady ? (
-            <CodeEditor
-              lang={lang}
-              value={code}
-              onChange={setCode}
-              breakpoints={breakpoints}
-              onToggleBreakpoint={toggleBreakpoint}
-              stoppedLine={exec.stoppedLine}
-            />
-          ) : (
-            <div />
-          ),
-          variables: (
-            <VariablesPanel
-              canDebug={LANGS[lang].debug}
-              isRunning={exec.isRunning}
-              hasBreakpoints={breakpoints.size > 0}
-              frames={exec.frames}
-              selectedFrameId={exec.selectedFrameId}
-              onSelectFrame={exec.selectFrame}
-              scopes={exec.scopes}
-              expandVariable={exec.expandVariable}
-              isPaused={exec.isPaused}
-              debugControls={{
-                onContinue: exec.resume,
-                onStepOver: exec.stepOver,
-                onStepIn: exec.stepIn,
-                onStepOut: exec.stepOut,
-              }}
-            />
-          ),
-          output: terminal,
-          tests: <TestsPanel lang={lang} state={exec.testState} isRunning={exec.isRunning} />,
-        }}
-      />
+      <div className="ide-body" data-explorer={explorerOpen ? 'open' : 'closed'}>
+        <Explorer lang={lang} entry={entry} activeFile={activeFile} openFiles={openSet} onOpen={open} ops={ops} />
+        <ResizableWorkspace
+          key={`${lang}-${dockKey}`}
+          layout={layout}
+          onLayoutChange={onLayoutChange}
+          onActivate={onActivate}
+          panes={panes}
+        />
+      </div>
+      {quickOpen && (
+        <QuickOpen
+          paths={shape.paths}
+          recent={recent}
+          onOpen={open}
+          onCreate={(path) => ops.create(path, 'file')}
+          onClose={() => setQuickOpen(false)}
+        />
+      )}
       {!shareReady && (
         <div className="ide-boot-overlay" aria-busy="true" aria-label="Loading share">
           <div className="ide-boot-spinner" />
@@ -263,17 +534,22 @@ export default function Page() {
   );
 }
 
+const EMPTY: ReadonlySet<number> = new Set();
+
 function RunStatus({
   isRunning,
   isPaused,
-  line,
+  stopped,
+  multiFile,
 }: {
   isRunning: boolean;
   isPaused: boolean;
-  line: number | null;
+  stopped: { path: string; line: number } | null;
+  multiFile: boolean;
 }) {
   const state = isPaused ? 'paused' : isRunning ? 'running' : 'idle';
-  const text = isPaused ? (line != null ? `Paused on line ${line}` : 'Paused') : isRunning ? 'Running' : 'Ready';
+  const where = stopped ? (multiFile ? `${basename(stopped.path)}:${stopped.line}` : `line ${stopped.line}`) : null;
+  const text = isPaused ? (where ? `Paused on ${where}` : 'Paused') : isRunning ? 'Running' : 'Ready';
   return (
     <span className="ide-status" data-state={state} role="status" aria-live="polite">
       <span className="ide-status-dot" aria-hidden />

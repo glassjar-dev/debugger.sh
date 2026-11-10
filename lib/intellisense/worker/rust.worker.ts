@@ -21,7 +21,7 @@ import type {
 } from '../types';
 import { postStatus, serve } from './host';
 import { parseRustcDiagnostics } from './rustcOutput';
-import { compileModule, fetchBytes, gunzip, newRoot, runProcess, untar, writeFile } from './wasi';
+import { compileModule, fetchBytes, gunzip, newRoot, removeFile, runProcess, untar, writeFile } from './wasi';
 
 const MAIN = '/main.rs';
 /** Same flags as the engine's Run. */
@@ -257,12 +257,25 @@ const viaRa = <P, R>(f: (p: P) => R) => async (p: P) => {
   return f(p);
 };
 
+/** The file being edited; rustc always checks the crate from main.rs, so modules resolve. */
+let active = MAIN;
+/** Workspace files written into the root, so deleted ones can be removed. */
+let written = new Set<string>();
+
 serve({
   ready: rustcReady,
   async diagnose(text) {
-    writeFile(root, MAIN, text);
+    writeFile(root, active, text);
     const { stderr } = await runProcess(rustc, RUSTC_ARGS, root);
-    return parseRustcDiagnostics(stderr, MAIN, text);
+    return parseRustcDiagnostics(stderr, active, text);
+  },
+  setActive(path) {
+    active = `/${path}`;
+  },
+  setFiles(files) {
+    for (const path of written) if (!Object.hasOwn(files, path)) removeFile(root, `/${path}`);
+    written = new Set(Object.keys(files));
+    for (const [path, text] of Object.entries(files)) if (`/${path}` !== active) writeFile(root, `/${path}`, text);
   },
   handlers: {
     complete: viaRa(complete),

@@ -35,6 +35,10 @@ const BASE_ARGS = [
   '-internal-isystem', '/include/wasm32-wasip1', '-x', 'c++', '-std=c++23', '-fexceptions',
   '-fcxx-exceptions', '-exception-model=wasm', '-target-feature', '+exception-handling',
   '-include-pch', PCH, '-fno-validate-pch',
+  // Like the engine: quoted includes also resolve from the workspace root.
+  '-iquote', '/',
+  // Headers are checked on their own when you edit them; `#pragma once` is right there.
+  '-Wno-pragma-once-outside-header',
 ];
 
 const IDENT = /[A-Za-z0-9_]/;
@@ -56,10 +60,10 @@ function positionOf(text: string, offset: number): Position {
 }
 
 /** `file:line:col` for clang, with a 1-based byte column. */
-function clangLoc(text: string, offset: number): string {
+function clangLoc(file: string, text: string, offset: number): string {
   const pos = positionOf(text, offset);
   const lineText = text.split('\n')[pos.line] ?? '';
-  return `${MAIN}:${pos.line + 1}:${utf16ToByteCol(lineText, pos.character)}`;
+  return `${file}:${pos.line + 1}:${utf16ToByteCol(lineText, pos.character)}`;
 }
 
 function wordAt(text: string, offset: number): { start: number; end: number } {
@@ -110,6 +114,8 @@ function receiverClasses(entries: string[]): string[] {
 }
 
 export class ClangService {
+  /** Absolute path of the file being edited; its relative #includes resolve from its folder. */
+  private main = MAIN;
   private stanfordNames: Set<string>;
   private docs: Map<string, StanfordDoc>;
 
@@ -133,10 +139,15 @@ export class ClangService {
     return d ? docMarkdown(d) : undefined;
   }
 
+  /** Which workspace file `update` and requests are about, like `lib/list.cpp`. */
+  setActive(path: string) {
+    this.main = `/${path}`;
+  }
+
   /** One clang process per request; the worker host runs them one at a time. */
   private run(text: string, extra: string[]) {
-    writeFile(this.root, MAIN, text);
-    return runProcess(this.module, [...BASE_ARGS, ...extra, MAIN], this.root);
+    writeFile(this.root, this.main, text);
+    return runProcess(this.module, [...BASE_ARGS, ...extra, this.main], this.root);
   }
 
   async diagnose(text: string): Promise<Diagnostic[]> {
@@ -144,12 +155,12 @@ export class ClangService {
       // Fix-its are only printed with caret diagnostics, so keep those on (the parser skips them).
       '-ferror-limit', '30', '-fdiagnostics-print-source-range-info', '-fdiagnostics-parseable-fixits',
     ]);
-    return parseClangDiagnostics(stderr, MAIN, text);
+    return parseClangDiagnostics(stderr, this.main, text);
   }
 
   private async completeAt(text: string, offset: number, extra: string[] = []) {
     const { stdout } = await this.run(text, [
-      `-code-completion-at=${clangLoc(text, offset)}`, '-code-completion-brief-comments', ...extra,
+      `-code-completion-at=${clangLoc(this.main, text, offset)}`, '-code-completion-brief-comments', ...extra,
     ]);
     return splitCompletionOutput(stdout);
   }
@@ -264,7 +275,7 @@ export class ClangService {
     const found: Array<{ loc: Loc; kind: string; isDefinition: boolean }> = [];
     // The JSON dumper only prints `file` when it differs from the previously
     // printed location, so track the last one seen in document order.
-    let lastFile = MAIN;
+    let lastFile = this.main;
     const see = (l?: AstLoc) => {
       const f = l?.file ?? l?.spellingLoc?.file ?? l?.expansionLoc?.file;
       if (f) lastFile = f;
@@ -290,7 +301,7 @@ export class ClangService {
     const lines = text.split('\n');
     // Prefer the nearest declaration above the cursor in the user's file.
     const local = found
-      .filter((f) => f.loc.file === MAIN)
+      .filter((f) => f.loc.file === this.main)
       .sort((a, b) => Number(b.isDefinition) - Number(a.isDefinition) || a.loc.line - b.loc.line);
     const above = local.filter((f) => f.loc.line - 1 <= pos.line).pop();
     const pick = above ?? local[0];

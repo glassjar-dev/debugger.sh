@@ -6,9 +6,11 @@ import {
   type SplitDir,
   type TabGroup,
   collectGroups,
+  filePane,
   isSplitNode,
   isTabGroup,
   newId,
+  paneFile,
   visiblePanes,
 } from './types';
 
@@ -215,6 +217,63 @@ export function splitLeaf(
     };
   });
 
+  return pruneEmpty({ root });
+}
+
+// ---------------------------------------------------------------------------
+// File tabs
+// ---------------------------------------------------------------------------
+
+/**
+ * Show `path`: activate its tab if it's open, otherwise add a tab to `preferGroupId`
+ * (the editor group used last), else to the group already holding files, else the first.
+ */
+export function openFile(state: DockState, path: string, preferGroupId?: string | null): DockState {
+  const pane = filePane(path);
+  if (visiblePanes(state).has(pane)) return activatePane(state, pane);
+  const groups = collectGroups(state.root);
+  const target =
+    groups.find((g) => g.id === preferGroupId) ??
+    groups.find((g) => g.tabs.some((t) => paneFile(t) !== null)) ??
+    groups[0];
+  return target ? openInGroup(state, target.id, pane) : state;
+}
+
+/** Point tabs at their new paths after a rename or move. */
+export function renameFiles(state: DockState, rename: (path: string) => string): DockState {
+  const root = mapNode(state.root, (n) => {
+    if (!isTabGroup(n)) return n;
+    const map = (t: PaneId): PaneId => {
+      const file = paneFile(t);
+      return file === null ? t : filePane(rename(file));
+    };
+    const tabs = n.tabs.map(map);
+    if (tabs.every((t, i) => t === n.tabs[i])) return n;
+    return { ...n, tabs, active: map(n.active) };
+  });
+  return root === state.root ? state : { root };
+}
+
+/** Drop tabs whose file is gone. If nothing would be left, `fallback` (the entry file) takes over. */
+export function closeFiles(state: DockState, gone: (path: string) => boolean, fallback: string): DockState {
+  const isGone = (t: PaneId) => {
+    const file = paneFile(t);
+    return file !== null && gone(file);
+  };
+  const groups = collectGroups(state.root);
+  if (!groups.some((g) => g.tabs.some(isGone))) return state;
+  // Never leave an empty layout: if only deleted files were open, the entry file takes over.
+  let replacement: PaneId | null = groups.every((g) => g.tabs.every(isGone)) ? filePane(fallback) : null;
+  const root = mapNode(state.root, (n) => {
+    if (!isTabGroup(n) || !n.tabs.some(isGone)) return n;
+    let tabs = n.tabs.filter((t) => !isGone(t));
+    if (replacement) {
+      tabs = [replacement];
+      replacement = null;
+    }
+    const active = tabs.includes(n.active) ? n.active : (tabs[tabs.length - 1] ?? n.active);
+    return { ...n, tabs, active };
+  });
   return pruneEmpty({ root });
 }
 

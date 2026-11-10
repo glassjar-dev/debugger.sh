@@ -11,7 +11,13 @@
 import type { Diagnostic, ServiceStatus } from '../types';
 
 export type Request = { id: number; method: string; params: unknown };
-export type ToWorker = Request | { type: 'update'; text: string; version: number };
+export type ToWorker =
+  | Request
+  | { type: 'update'; text: string; version: number }
+  /** The workspace's files, so includes and modules resolve. */
+  | { type: 'files'; files: Readonly<Record<string, string>> }
+  /** Which workspace file `update` and requests refer to. */
+  | { type: 'active'; path: string };
 export type FromWorker =
   | { id: number; result?: unknown; error?: string }
   | { type: 'diagnostics'; version: number; diagnostics: Diagnostic[] }
@@ -29,6 +35,8 @@ export function serve(options: {
   ready: Promise<void>;
   handlers: Handlers;
   diagnose: (text: string) => Promise<Diagnostic[]>;
+  setFiles?: (files: Readonly<Record<string, string>>) => void;
+  setActive?: (path: string) => void;
   debounceMs?: number;
 }) {
   const latest = new Map<string, number>();
@@ -76,9 +84,13 @@ export function serve(options: {
     }
   };
 
+  // Workspace changes that arrived while the toolchain loaded; they apply before any request.
+  const waiting: Array<() => void> = [];
+
   options.ready.then(
     () => {
       started = true;
+      for (const apply of waiting.splice(0)) apply();
       void pump();
     },
     (error: unknown) => {
@@ -90,10 +102,24 @@ export function serve(options: {
     },
   );
 
+  // Workspace changes apply in arrival order, and always before the requests behind them.
+  const whenReady = (apply: () => void) => (started ? apply() : void waiting.push(apply));
+
   self.onmessage = (event) => {
     const msg = event.data;
-    if ('type' in msg) {
+    if ('type' in msg && msg.type === 'active') {
+      // Arrives just before the new file's `update`, which schedules its check.
+      whenReady(() => options.setActive?.(msg.path));
+      return;
+    }
+    if ('type' in msg && msg.type === 'files') {
+      // Another file changed: the open one may now check differently.
+      whenReady(() => options.setFiles?.(msg.files));
+      if (!doc) return;
+    } else if ('type' in msg) {
       doc = { text: msg.text, version: msg.version };
+    }
+    if ('type' in msg) {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;

@@ -33,7 +33,7 @@ function isSimpleTestHarnessFrame(frame: StackFrame): boolean {
   return false;
 }
 
-/** Normalize DAP / DWARF source paths for comparison with LANGS[*].sourcePath. */
+/** Normalize DAP / DWARF source paths to absolute virtual paths like `/lib/list.cpp`. */
 function normalizeSourcePath(path: string | undefined | null): string {
   if (!path) return '';
   let p = path.startsWith('file://') ? path.slice('file://'.length) : path;
@@ -42,13 +42,16 @@ function normalizeSourcePath(path: string | undefined | null): string {
   return p;
 }
 
-/** True when the frame is the single editable main file (never library / harness). */
-function isMainSource(
-  path: string | undefined | null,
-  mainPath: string
-): boolean {
-  return normalizeSourcePath(path) === normalizeSourcePath(mainPath);
+/** The workspace file a DAP / DWARF path points at, or null for library and harness code. */
+function userFile(path: string | undefined | null, files: ReadonlySet<string>): string | null {
+  const file = normalizeSourcePath(path).slice(1);
+  return files.has(file) ? file : null;
 }
+
+/** Breakpoint lines per workspace file path. */
+export type Breakpoints = ReadonlyMap<string, ReadonlySet<number>>;
+/** Where the program is paused: a workspace file and a 1-based line. */
+export type StopLocation = { path: string; line: number };
 
 type StopReason = 'breakpoint' | 'step' | 'exception' | 'pause';
 
@@ -93,15 +96,17 @@ export type UseExecutionOptions = {
 export type ExecutionApi = {
   isRunning: boolean;
   isPaused: boolean;
-  stoppedLine: number | null;
+  /** The selected frame's place in your code while paused. */
+  stopped: StopLocation | null;
   frames: StackFrame[];
   selectedFrameId: number | null;
   scopes: ScopeView[];
   debugLoading: boolean;
   testState: TestRunState | null;
+  /** Run the workspace: every file by path, starting from the language's entry file. */
   run: (
-    code: string,
-    breakpoints: ReadonlySet<number>,
+    files: Readonly<Record<string, string>>,
+    breakpoints: Breakpoints,
     lang: Lang
   ) => Promise<void>;
   stop: () => void;
@@ -113,7 +118,9 @@ export type ExecutionApi = {
   /** Sync DAP `variables` request — returns child variables or [] on failure. */
   expandVariable: (ref: number) => DapVariable[];
   /** Push a new breakpoint set to the running runtime (no-op if not running). */
-  applyBreakpoints: (breakpoints: ReadonlySet<number>) => void;
+  applyBreakpoints: (breakpoints: Breakpoints) => void;
+  /** Starts the engine for `lang` ahead of its first Run. Safe to call repeatedly. */
+  warm: (lang: Lang) => void;
 };
 
 export function useExecution({
@@ -121,7 +128,7 @@ export function useExecution({
 }: UseExecutionOptions): ExecutionApi {
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  const [stoppedLine, setStoppedLine] = useState<number | null>(null);
+  const [stopped, setStopped] = useState<StopLocation | null>(null);
   const [frames, setFrames] = useState<StackFrame[]>([]);
   const [selectedFrameId, setSelectedFrameId] = useState<number | null>(null);
   const [scopes, setScopes] = useState<ScopeView[]>([]);
@@ -139,7 +146,11 @@ export function useExecution({
   const dapSeqRef = useRef(1);
   const ioCleanupRef = useRef<(() => void) | null>(null);
   const stdinDisposeRef = useRef<(() => void) | null>(null);
-  const breakpointsRef = useRef<ReadonlySet<number>>(new Set());
+  const breakpointsRef = useRef<Breakpoints>(new Map());
+  /** Files the engine last heard breakpoints for, so removing a file's last one clears it. */
+  const sentBreakpointFilesRef = useRef<Set<string>>(new Set());
+  /** The running workspace's paths: stepping only ever stops in these. */
+  const userFilesRef = useRef<ReadonlySet<string>>(new Set());
   const langRef = useRef<Lang>('c');
   const testDecoderRef = useRef<ReturnType<typeof createTestReportDecoder> | null>(null);
   const testStateRafRef = useRef<number | null>(null);
@@ -166,15 +177,26 @@ export function useExecution({
     return pending;
   }, []);
 
-  // Start the C++ worker and compiler as soon as the IDE mounts, so the first Run only
-  // builds, and fetch the common (non-debug) Stanford artifacts. Debug archives load on demand.
-  useEffect(() => {
-    preparingRef.current = getEngine('c')
-      .then((engine) => engine.prepareCompiler())
+  const warmedRef = useRef<Set<Lang>>(new Set());
+  /**
+   * Starts the engine for the language on screen, so the first Run doesn't wait for it.
+   * For C++ that also loads the compiler and the common (non-debug) Stanford artifacts;
+   * debug archives load on demand.
+   */
+  const warm = useCallback(
+    (lang: Lang) => {
+      if (warmedRef.current.has(lang)) return;
+      warmedRef.current.add(lang);
+      let ready: Promise<unknown> = getEngine(lang);
+      if (lang === 'c') {
+        ready = preparingRef.current = getEngine('c').then((engine) => engine.prepareCompiler());
+        void loadStanfordArtifacts('run');
+      }
       // A Run started during the warm-up releases IntelliSense when it finishes instead.
-      .finally(() => !isRunningRef.current && markRunnerReady());
-    void loadStanfordArtifacts('run');
-  }, [getEngine]);
+      void ready.catch(() => undefined).finally(() => !isRunningRef.current && markRunnerReady());
+    },
+    [getEngine],
+  );
 
   const dapSend = useCallback(
     <T>(command: string, args: Record<string, unknown>) => {
@@ -192,11 +214,16 @@ export function useExecution({
   );
 
   const sendBreakpoints = useCallback(() => {
-    const lines = Array.from(breakpointsRef.current).sort((a, b) => a - b);
-    dapSend('setBreakpoints', {
-      source: { path: LANGS[langRef.current].sourcePath },
-      breakpoints: lines.map((line) => ({ line })),
-    });
+    const current = breakpointsRef.current;
+    const files = new Set([...sentBreakpointFilesRef.current, ...current.keys()]);
+    for (const file of files) {
+      const lines = Array.from(current.get(file) ?? []).sort((a, b) => a - b);
+      dapSend('setBreakpoints', {
+        source: { path: `/${file}` },
+        breakpoints: lines.map((line) => ({ line })),
+      });
+    }
+    sentBreakpointFilesRef.current = new Set([...current].filter(([, lines]) => lines.size > 0).map(([f]) => f));
   }, [dapSend]);
 
   /** Steps 5–8 in the engine DAP lifecycle; returns true once the worker is unblocked. */
@@ -239,11 +266,9 @@ export function useExecution({
         // Stack can lag the stopped event — leave the twin refresh to retry.
         if (raw.length === 0) return;
 
-        const mainPath = LANGS[langRef.current].sourcePath;
-
-        // Just-my-code: never surface a pause whose PC is outside the main file
+        // Just-my-code: never surface a pause whose PC is outside your files
         // (Stanford headers, libc++, SimpleTest harness, etc.).
-        if (!isMainSource(raw[0]?.source?.path, mainPath)) {
+        if (!userFile(raw[0]?.source?.path, userFilesRef.current)) {
           // Invalidate sibling refresh so we don't double-resume.
           debugRefreshGenRef.current += 1;
           // Keep the original stop reason across the automatic step-out.
@@ -251,7 +276,7 @@ export function useExecution({
           // Return to the caller so step-through keeps going on the next main-file line.
           dapSend('stepOut', { threadId: 1 });
           setIsPaused(false);
-          setStoppedLine(null);
+          setStopped(null);
           setFrames([]);
           setSelectedFrameId(null);
           setScopes([]);
@@ -263,11 +288,12 @@ export function useExecution({
         setFrames(fs);
         if (fs.length === 0) {
           setSelectedFrameId(null);
-          setStoppedLine(null);
+          setStopped(null);
           setScopes([]);
           return;
         }
-        setStoppedLine(fs[0].line);
+        const top = userFile(fs[0].source?.path, userFilesRef.current);
+        setStopped(top ? { path: top, line: fs[0].line } : null);
         setSelectedFrameId(fs[0].id);
         const views = loadFrame(fs[0].id);
         if (emittedStopGenRef.current !== expectedGen) {
@@ -275,6 +301,7 @@ export function useExecution({
           const line = fs[0].line;
           Telemetry.log('debug_stop', {
             reason: stopReasonRef.current,
+            ...(top ? { file: top } : {}),
             ...(line > 0 ? { line } : {}),
             frame_count: fs.length,
             top_frame: toDebugFrame(0, fs[0].name, views),
@@ -296,7 +323,7 @@ export function useExecution({
 
   const clearDebug = useCallback(() => {
     setIsPaused(false);
-    setStoppedLine(null);
+    setStopped(null);
     setFrames([]);
     setSelectedFrameId(null);
     setScopes([]);
@@ -405,7 +432,7 @@ export function useExecution({
   );
 
   const run = useCallback(
-    async (code: string, breakpoints: ReadonlySet<number>, lang: Lang) => {
+    async (files: Readonly<Record<string, string>>, breakpoints: Breakpoints, lang: Lang) => {
       if (isRunningRef.current) return;
       Telemetry.log('run_start');
       let finish: {
@@ -416,10 +443,11 @@ export function useExecution({
       } = { reason: 'error' };
       const started = performance.now();
       langRef.current = lang;
-      const { fsKey } = LANGS[lang];
       breakpointsRef.current = breakpoints;
+      sentBreakpointFilesRef.current = new Set();
+      userFilesRef.current = new Set(Object.keys(files));
       // Prefer a fast non-debug build when nothing needs DWARF / instrumentation.
-      const wantsDebug = LANGS[lang].debug && breakpoints.size > 0;
+      const wantsDebug = LANGS[lang].debug && [...breakpoints.values()].some((lines) => lines.size > 0);
       teardown();
       clearDebug();
       setTestState(null);
@@ -457,27 +485,21 @@ export function useExecution({
         rt.debugger.enabled = wantsDebug;
 
         if (lang === 'c') {
-          const prepared = prepareCppRun(code, fsKey);
+          const prepared = prepareCppRun(files, LANGS[lang].fsKey);
           const stanford = await loadStanfordArtifacts(wantsDebug ? 'debug' : 'run');
           rt.fs = mergeDirNodes(
             pathsToDirNode(stanford.fsFiles),
             pathsToDirNode(prepared.files),
           );
           rt.binaryFiles = { ...stanford.binaryFiles };
-          const studentSourcePath = `/${fsKey}`;
-          rt.cppArtifacts = {
-            ...stanford.cppArtifacts,
-            sources: prepared.hasTests
-              ? [studentSourcePath, ...prepared.extraSources]
-              : [studentSourcePath],
-          };
+          rt.cppArtifacts = { ...stanford.cppArtifacts, sources: prepared.sources };
           if (prepared.hasTests) {
             testDecoderRef.current = createTestReportDecoder(prepared.nonce);
             // Defer React state updates until after the engine is wired so a
             // re-render cannot remount the terminal mid-setup.
           }
         } else {
-          rt.fs = { [fsKey]: code };
+          rt.fs = pathsToDirNode({ ...files });
         }
 
         const handshakeDoneRef = { current: !wantsDebug };
@@ -655,7 +677,7 @@ export function useExecution({
     Telemetry.log('debug_step', { kind: 'continue' });
     dapSend('continue', { threadId: 1 });
     setIsPaused(false);
-    setStoppedLine(null);
+    setStopped(null);
     setFrames([]);
     setSelectedFrameId(null);
     setScopes([]);
@@ -681,6 +703,9 @@ export function useExecution({
       const views = loadFrame(id);
       const index = frames.findIndex((frame) => frame.id === id);
       const frame = index >= 0 ? frames[index] : undefined;
+      // Selecting a caller shows where it is waiting, in whichever file that is.
+      const file = frame ? userFile(frame.source?.path, userFilesRef.current) : null;
+      if (frame && file) setStopped({ path: file, line: frame.line });
       if (frame) Telemetry.log('debug_frame', { frame: toDebugFrame(index, frame.name, views) });
     },
     [frames, loadFrame]
@@ -698,7 +723,7 @@ export function useExecution({
   );
 
   const applyBreakpoints = useCallback(
-    (breakpoints: ReadonlySet<number>) => {
+    (breakpoints: Breakpoints) => {
       breakpointsRef.current = breakpoints;
       if (runtimeRef.current) sendBreakpoints();
     },
@@ -708,7 +733,7 @@ export function useExecution({
   return {
     isRunning,
     isPaused,
-    stoppedLine,
+    stopped,
     frames,
     selectedFrameId,
     scopes,
@@ -723,5 +748,6 @@ export function useExecution({
     selectFrame,
     expandVariable,
     applyBreakpoints,
+    warm,
   };
 }
