@@ -11,3 +11,19 @@
 /engine_bg.wasm
   Content-Type: application/wasm
   Cross-Origin-Resource-Policy: same-origin
+
+# Cloudflare compresses responses only for content types on its list, and these files
+# would otherwise go out as uncompressed octet-streams (support.pch 19.7MB -> 11.7MB).
+# The type is a label for the edge: the IDE reads the bytes with fetch() and checks
+# their SHA-256, so nothing interprets them as protobuf.
+/cs106b/support.pch
+  Content-Type: application/x-protobuf
+
+/cs106b/run.a
+  Content-Type: application/x-protobuf
+
+/cs106b/debug.a
+  Content-Type: application/x-protobuf
+
+/cs106b/EnglishWords.dat
+  Content-Type: text/plain; charset=utf-8
