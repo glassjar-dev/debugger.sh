@@ -248,6 +248,16 @@ class PyrightService implements LanguageService {
     this.notify('textDocument/didOpen', {
       textDocument: { uri: DOC_URI, languageId: 'python', version: ++this.version, text: this.text },
     });
+    // The first member completion makes basedpyright evaluate builtins (~1.5 s).
+    // Do it now in a scratch document, off the user's clock.
+    const warm = `file://${ROOT}__warmup__.py`;
+    this.notify('textDocument/didOpen', {
+      textDocument: { uri: warm, languageId: 'python', version: 1, text: 'x = [""]\nx.\nx[0].\n' },
+    });
+    void Promise.all([
+      this.request('textDocument/completion', { textDocument: { uri: warm }, position: { line: 1, character: 2 } }),
+      this.request('textDocument/completion', { textDocument: { uri: warm }, position: { line: 2, character: 5 } }),
+    ]).then(() => this.notify('textDocument/didClose', { textDocument: { uri: warm } }));
   }
 
   /** Brings the server's copy of the document up to `text`. */

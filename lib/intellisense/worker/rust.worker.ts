@@ -72,7 +72,10 @@ let raStd: Uint8Array | null = null;
 function startAnalyzer() {
   const analyzer = new raGlue!.RustAnalyzer();
   analyzer.load_std(raStd!);
-  analyzer.set_text('fn main() { let v: Vec<i32> = Vec::new(); }');
+  // Index std and the common method tables before the user's first `.`.
+  analyzer.set_text('fn main() {\n    let mut v: Vec<i32> = Vec::new();\n    let s = String::new();\n    v.\n    s.\n}\n');
+  analyzer.completions(3, 6);
+  analyzer.completions(4, 6);
   analyzer.diagnostics();
   ra = analyzer;
   raText = null;

@@ -97,21 +97,34 @@ export function untar(tar: Uint8Array, root: FsRoot, filter?: (path: string) => 
   return count;
 }
 
-/** Fetches a URL into memory. Toolchain URLs are immutable, so the HTTP cache usually answers. */
-export async function fetchBytes(url: string): Promise<Uint8Array> {
-  const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  return new Uint8Array(await response.arrayBuffer());
+/**
+ * Downloads with one retry. The language workers start while the engine
+ * downloads the same toolchain, and a body read can fail mid-stream.
+ */
+async function withRetry<T>(url: string, read: (response: Response) => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return await read(response);
+    } catch (error) {
+      if (attempt >= 1) throw new Error(`${url}: ${String(error)}`);
+      await new Promise((r) => setTimeout(r, 800));
+    }
+  }
 }
 
-export async function compileModule(url: string): Promise<WebAssembly.Module> {
-  const response = await fetch(url, { mode: 'cors', credentials: 'omit' });
-  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
-  try {
-    return await WebAssembly.compileStreaming(response.clone());
-  } catch {
-    return WebAssembly.compile(await response.arrayBuffer());
-  }
+/** Fetches a URL into memory. Toolchain URLs are immutable, so the HTTP cache usually answers. */
+export function fetchBytes(url: string): Promise<Uint8Array> {
+  return withRetry(url, async (response) => new Uint8Array(await response.arrayBuffer()));
+}
+
+export function compileModule(url: string): Promise<WebAssembly.Module> {
+  return withRetry(url, async (response) =>
+    response.headers.get('content-type')?.includes('application/wasm')
+      ? WebAssembly.compileStreaming(response)
+      : WebAssembly.compile(await response.arrayBuffer()),
+  );
 }
 
 export type ProcessResult = { exitCode: number; stdout: string; stderr: string };

@@ -1,9 +1,11 @@
 /**
  * The worker side of the small RPC the editor uses with the C++ and Rust
- * language workers. Requests of the same method supersede each other: if a
- * newer `complete` arrives while an older one is still queued, the older one
- * is answered with `null` without running (typing fast never builds a backlog).
- * Diagnostics run debounced on the newest document version only.
+ * language workers. The toolchain runs one job at a time, so:
+ *  - interactive requests (completion, hover, signature help, definition) go
+ *    before background diagnostics, so typing never waits on a full check;
+ *  - a request superseded by a newer one of the same method is answered with
+ *    `null` without running (typing fast never builds a backlog);
+ *  - diagnostics run debounced, on the newest document version only.
  */
 
 import type { Diagnostic, ServiceStatus } from '../types';
@@ -23,60 +25,86 @@ declare const self: {
 };
 
 export function serve(options: {
-  /** Loads the toolchain; requests wait for it. */
+  /** Loads the toolchain; nothing runs before it settles. */
   ready: Promise<void>;
   handlers: Handlers;
   diagnose: (text: string) => Promise<Diagnostic[]>;
   debounceMs?: number;
 }) {
   const latest = new Map<string, number>();
-  let chain: Promise<unknown> = options.ready;
-  let pending: { text: string; version: number } | null = null;
+  const requests: Request[] = [];
+  let doc: { text: string; version: number } | null = null;
+  let diagnoseDue = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let checking = false;
+  let busy = false;
+  let started = false;
 
-  const enqueue = <T>(job: () => Promise<T>) => {
-    const next = chain.then(job, job);
-    chain = next.catch(() => undefined);
-    return next;
+  const pump = async () => {
+    if (busy || !started) return;
+    busy = true;
+    try {
+      for (;;) {
+        const msg = requests.shift();
+        if (msg) {
+          if (latest.get(msg.method) !== msg.id) {
+            self.postMessage({ id: msg.id, result: null }); // superseded
+            continue;
+          }
+          const handler = options.handlers[msg.method];
+          try {
+            if (!handler) throw new Error(`unknown method ${msg.method}`);
+            self.postMessage({ id: msg.id, result: await handler(msg.params as never) });
+          } catch (error) {
+            self.postMessage({ id: msg.id, error: String((error as Error)?.message ?? error) });
+          }
+          continue;
+        }
+        if (diagnoseDue && doc) {
+          diagnoseDue = false;
+          const { text, version } = doc;
+          try {
+            self.postMessage({ type: 'diagnostics', version, diagnostics: await options.diagnose(text) });
+          } catch (error) {
+            console.warn('[intellisense] diagnostics failed', error);
+          }
+          continue;
+        }
+        break;
+      }
+    } finally {
+      busy = false;
+    }
   };
 
-  const runDiagnostics = () => {
-    timer = null;
-    if (checking || !pending) return;
-    const { text, version } = pending;
-    pending = null;
-    checking = true;
-    void enqueue(() => options.diagnose(text))
-      .then((diagnostics) => self.postMessage({ type: 'diagnostics', version, diagnostics }))
-      .catch((error) => console.warn('[intellisense] diagnostics failed', error))
-      .finally(() => {
-        checking = false;
-        if (pending) schedule();
-      });
-  };
-  const schedule = () => {
-    if (timer) clearTimeout(timer);
-    timer = setTimeout(runDiagnostics, options.debounceMs ?? 300);
-  };
+  options.ready.then(
+    () => {
+      started = true;
+      void pump();
+    },
+    (error: unknown) => {
+      // Answer everything with an error rather than leaving callers hanging.
+      started = true;
+      options.handlers = {};
+      options.diagnose = () => Promise.reject(error);
+      void pump();
+    },
+  );
 
   self.onmessage = (event) => {
     const msg = event.data;
     if ('type' in msg) {
-      pending = { text: msg.text, version: msg.version };
-      schedule();
+      doc = { text: msg.text, version: msg.version };
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        diagnoseDue = true;
+        void pump();
+      }, options.debounceMs ?? 300);
       return;
     }
     latest.set(msg.method, msg.id);
-    const handler = options.handlers[msg.method];
-    void enqueue(async () => {
-      if (latest.get(msg.method) !== msg.id) return null; // superseded
-      if (!handler) throw new Error(`unknown method ${msg.method}`);
-      return handler(msg.params as never);
-    }).then(
-      (result) => self.postMessage({ id: msg.id, result }),
-      (error: unknown) => self.postMessage({ id: msg.id, error: String((error as Error)?.message ?? error) }),
-    );
+    requests.push(msg);
+    void pump();
   };
 }
 

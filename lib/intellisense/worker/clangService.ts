@@ -100,7 +100,6 @@ function enclosingCall(text: string, offset: number): { argStart: number; open: 
 
 export class ClangService {
   private stanfordNames: Set<string>;
-  private queue: Promise<unknown> = Promise.resolve();
 
   constructor(
     private readonly module: WebAssembly.Module,
@@ -111,14 +110,10 @@ export class ClangService {
     for (const src of Object.values(stanfordHeaders)) for (const id of identifiersIn(src)) this.stanfordNames.add(id);
   }
 
-  /** clang runs one process at a time; requests queue behind each other. */
+  /** One clang process per request; the worker host runs them one at a time. */
   private run(text: string, extra: string[]) {
-    const job = this.queue.then(() => {
-      writeFile(this.root, MAIN, text);
-      return runProcess(this.module, [...BASE_ARGS, ...extra, MAIN], this.root);
-    });
-    this.queue = job.catch(() => undefined);
-    return job;
+    writeFile(this.root, MAIN, text);
+    return runProcess(this.module, [...BASE_ARGS, ...extra, MAIN], this.root);
   }
 
   async diagnose(text: string): Promise<Diagnostic[]> {
