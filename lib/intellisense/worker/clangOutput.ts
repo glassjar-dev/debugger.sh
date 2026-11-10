@@ -458,10 +458,11 @@ function rangeOf(
 
 function fixTitle(edits: TextEdit[]): string {
   const [e] = edits;
+  const quote = (t: string) => `‘${t.length > 24 ? t.slice(0, 22) + '…' : t}’`;
   if (edits.length === 1 && e.text && e.range.start.line === e.range.end.line && e.range.start.character === e.range.end.character)
-    return `Insert \`${e.text}\``;
+    return `Insert ${quote(e.text)}`;
   if (edits.length === 1 && !e.text) return 'Remove';
-  if (edits.length === 1) return `Replace with \`${e.text}\``;
+  if (edits.length === 1) return `Replace with ${quote(e.text)}`;
   return 'Apply fix';
 }
 

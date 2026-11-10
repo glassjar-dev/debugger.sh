@@ -115,12 +115,13 @@ function inline(text: string, into: HTMLElement) {
     else if (m[6] != null) {
       const href = m[7];
       if (/^https?:\/\//.test(href)) {
-        const a = el('a', 'gj-md-link', decode(m[6]));
+        const a = el('a', 'gj-md-link');
+        inline(m[6], a);
         a.href = href;
         a.target = '_blank';
         a.rel = 'noopener noreferrer';
         into.append(a);
-      } else into.append(decode(m[6])); // intra-doc links (rustdoc) have nowhere to go
+      } else inline(m[6], into); // intra-doc links (rustdoc) have nowhere to go
     }
     last = m.index! + m[0].length;
   }

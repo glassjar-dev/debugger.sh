@@ -141,8 +141,8 @@ export class ClangService {
 
   async diagnose(text: string): Promise<Diagnostic[]> {
     const { stderr } = await this.run(text, [
+      // Fix-its are only printed with caret diagnostics, so keep those on (the parser skips them).
       '-ferror-limit', '30', '-fdiagnostics-print-source-range-info', '-fdiagnostics-parseable-fixits',
-      '-fno-caret-diagnostics',
     ]);
     return parseClangDiagnostics(stderr, MAIN, text);
   }
