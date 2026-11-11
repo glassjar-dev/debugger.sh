@@ -1,6 +1,6 @@
 'use client';
 
-import { Engine } from 'debugger-sh';
+import { Engine, type PackageStatus } from 'debugger-sh';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { LANGS, type Lang } from '@/components/constants';
@@ -160,6 +160,24 @@ export function useExecution({
   const stopReasonRef = useRef<StopReason>('pause');
   const autoSkipStopRef = useRef(false);
   const emittedStopGenRef = useRef(-1);
+  /** Shows package installs (and packages that can't run here) in the terminal, durably. */
+  const notePackage = useCallback(
+    (status: PackageStatus) => {
+      const line =
+        status.kind === 'skipped'
+          ? `\x1b[33m${status.message}\x1b[0m\r\n`
+          : status.kind === 'installing'
+            ? `\x1b[3;90m${status.message}…\x1b[0m\r\n`
+            : '';
+      if (!line) return;
+      stdoutBufferRef.current += line;
+      terminalRef.current?.write(line);
+    },
+    [terminalRef]
+  );
+  const notePackageRef = useRef(notePackage);
+  notePackageRef.current = notePackage;
+
   const getEngine = useCallback(async (lang: Lang): Promise<Engine> => {
     const existing = enginesRef.current[lang];
     if (existing) return existing;
@@ -168,6 +186,10 @@ export function useExecution({
       // scripts/copy-engine-wasm.mjs puts the engine's own Wasm in public/.
       pending = Engine.create(lang as Parameters<typeof Engine.create>[0], {
         wasmUrl: '/engine_bg.wasm',
+        // Python installs what a program imports from PyPI (pure-Python packages only).
+        ...(lang === 'python'
+          ? { python: { packages: true, onPackageStatus: (status: PackageStatus) => notePackageRef.current(status) } }
+          : {}),
       }).then((engine) => {
         enginesRef.current[lang] = engine;
         return engine;

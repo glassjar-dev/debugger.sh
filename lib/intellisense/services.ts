@@ -251,8 +251,14 @@ class PyrightService implements LanguageService {
       initializationOptions: {
         files: {
           // The engine runs CPython 3.15. "standard" catches real type errors
-          // without basedpyright's stricter "recommended" noise.
-          [`${ROOT}pyrightconfig.json`]: JSON.stringify({ pythonVersion: '3.15', typeCheckingMode: 'standard' }),
+          // without basedpyright's stricter "recommended" noise. Third-party imports are
+          // installed from PyPI when the program runs, so an import basedpyright can't see
+          // yet is a warning, not an error.
+          [`${ROOT}pyrightconfig.json`]: JSON.stringify({
+            pythonVersion: '3.15',
+            typeCheckingMode: 'standard',
+            reportMissingImports: 'warning',
+          }),
         },
       },
     });
