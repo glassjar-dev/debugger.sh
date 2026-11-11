@@ -250,9 +250,9 @@ class PyrightService implements LanguageService {
       },
       initializationOptions: {
         files: {
-          // The engine runs CPython 3.11. "standard" catches real type errors
+          // The engine runs CPython 3.15. "standard" catches real type errors
           // without basedpyright's stricter "recommended" noise.
-          [`${ROOT}pyrightconfig.json`]: JSON.stringify({ pythonVersion: '3.11', typeCheckingMode: 'standard' }),
+          [`${ROOT}pyrightconfig.json`]: JSON.stringify({ pythonVersion: '3.15', typeCheckingMode: 'standard' }),
         },
       },
     });
