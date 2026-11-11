@@ -24,7 +24,7 @@ const cache =
 const guestRoot = join(cache, 'sysroot');
 
 const compilerDigest =
-  '2d2c6ae498b27592a3cec7a270f274a08848a834e762cc08818c78626c32053a';
+  'd6b8d6e4596136fc6ae451fe3b81b1be5a1829505cbc993179247c75a764ce87';
 const sysrootDigest =
   '8745c6af23fd841fa507d0c73f6b6b8e8da1b4ec216a6339739a28b38ff7227b';
 
@@ -153,7 +153,7 @@ if (artifactsFresh) {
     let bytes = await readFile(path).catch(() => undefined);
     if (!bytes || hash(bytes) !== expected) {
       console.log(`  fetching ${name}…`);
-      const release = name === 'llvm.core.wasm' ? '2026-11-10-slim' : '2026-05-22';
+      const release = name === 'llvm.core.wasm' ? '2026-11-10-fast' : '2026-05-22';
       const response = await fetch(`https://cdn.yousefabuhashem.com/clang/${release}/${name}`);
       if (!response.ok) throw new Error(`Cannot fetch ${name}: ${response.status}`);
       bytes = Buffer.from(await response.arrayBuffer());
