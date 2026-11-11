@@ -9,8 +9,9 @@ const CDN = 'https://cdn.yousefabuhashem.com';
 // glassjar-dev/clang slim build; must match the engine's pinned compiler (shares its HTTP cache entry).
 export const CLANG_WASM_URL = `${CDN}/clang/2026-11-10-fast/llvm.core.wasm`;
 export const CLANG_SYSROOT_URL = `${CDN}/clang/2026-05-22/llvm-resources.tar.gz`;
-export const RUSTC_WASM_URL = `${CDN}/rust/2026-05-31/rustc.wasm`;
-export const RUST_SYSROOT_URL = `${CDN}/rust/2026-05-31/rust-sysroot.tar.gz`;
+// glassjar-dev/rust: rustc with its own wasm-ld, and the std it compiles against (zstd).
+export const RUSTC_WASM_URL = `${CDN}/rust/2026-11-11/rustc.wasm`;
+export const RUST_SYSROOT_URL = `${CDN}/rust/2026-11-11/rust-sysroot.tar.zst`;
 
 /** The edition Run compiles Rust with (engine `start_rust`, `--edition`). */
 export const RUST_EDITION = 2024;

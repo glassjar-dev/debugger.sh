@@ -7,6 +7,8 @@
  *    rust-analyzer compiled to wasm (tools/ra-wasm) with std sources.
  */
 
+import { decompress as unzstd } from 'fzstd';
+
 import { RUST_ANALYZER_BASE, RUST_EDITION, RUST_SYSROOT_URL, RUSTC_WASM_URL } from '../toolchains';
 import type {
   CompletionItem,
@@ -49,7 +51,7 @@ let raText: string | null = null;
 const rustcReady = (async () => {
   const [module, sysroot] = await Promise.all([
     compileModule(RUSTC_WASM_URL),
-    fetchBytes(RUST_SYSROOT_URL).then(gunzip),
+    fetchBytes(RUST_SYSROOT_URL).then(unzstd),
   ]);
   // Checking only needs crate metadata, not the rlibs' object code.
   untar(sysroot, root, (path) => path.endsWith('.rmeta'));
