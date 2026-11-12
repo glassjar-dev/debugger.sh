@@ -30,6 +30,8 @@ import {
 import { useExecution, type Breakpoints } from '@/hooks/useExecution';
 import { getLanguageService } from '@/lib/intellisense/services';
 import { runnerReady } from '@/lib/intellisense/runnerReady';
+import { pathsToDirNode } from '@/lib/stanford/fsTree';
+import { pythonPackageFiles, SITE_PACKAGES } from 'debugger-sh';
 import { getShare } from '@/lib/share/api';
 import type { WorkspaceState } from '@/lib/share/types';
 import { installTelemetry, Telemetry } from '@/lib/telemetry/client';
@@ -122,6 +124,31 @@ export default function Page() {
     void runnerReady(lang).then(() => alive && getLanguageService(lang).setFiles?.(ws.files));
     return () => {
       alive = false;
+    };
+  }, [lang, ws.files]);
+
+  // Python IntelliSense also sees the PyPI packages a program imports: the same installs
+  // Run uses (shared, so nothing downloads twice), quietly and after typing settles.
+  useEffect(() => {
+    if (lang !== 'python') return;
+    let alive = true;
+    const timer = setTimeout(() => {
+      void runnerReady(lang)
+        .then(() => (alive ? pythonPackageFiles(pathsToDirNode({ ...ws.files })) : Promise.resolve<Record<string, Uint8Array>>({})))
+        .then((files) => {
+          if (!alive) return;
+          const decoder = new TextDecoder();
+          const sources: Record<string, string> = {};
+          for (const [path, bytes] of Object.entries(files))
+            if (path.startsWith(`${SITE_PACKAGES}/`) && /\.(py|pyi)$|\/py\.typed$/.test(path))
+              sources[path.slice(SITE_PACKAGES.length + 1)] = decoder.decode(bytes);
+          getLanguageService(lang).setPackages?.(sources);
+        })
+        .catch(() => undefined);
+    }, 800);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
     };
   }, [lang, ws.files]);
 

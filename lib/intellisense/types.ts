@@ -154,4 +154,6 @@ export interface LanguageService {
   setActive?(path: string): void;
   /** Every file in the workspace, so includes, imports and `mod`s resolve. */
   setFiles?(files: Readonly<Record<string, string>>): void;
+  /** Installed third-party sources, by path inside site-packages, for import resolution. */
+  setPackages?(files: Readonly<Record<string, string>>): void;
 }

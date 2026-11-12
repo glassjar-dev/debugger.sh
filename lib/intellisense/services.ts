@@ -123,6 +123,8 @@ class WorkerService implements LanguageService {
 
 const PYRIGHT_URL = '/intellisense/pyright.worker.js';
 const ROOT = '/src/';
+/** Where installed PyPI packages live for basedpyright (on its extraPaths). */
+const SITE_PACKAGES = '/site-packages';
 const uriOf = (path: string) => `file://${ROOT}${path}`;
 
 type Rpc = { jsonrpc: '2.0'; id?: number; method?: string; params?: unknown; result?: unknown; error?: { message: string } };
@@ -147,7 +149,7 @@ class PyrightService implements LanguageService {
   readonly triggerCharacters = ['.'];
   readonly signatureTriggers = ['(', ','];
   private workers: Worker[] = [];
-  private foreground: Worker;
+  private foreground!: Worker;
   private nextId = 1;
   private calls = new Map<number, (value: unknown) => void>();
   private diagnostics = new Emitter<[number, Diagnostic[]]>(false);
@@ -161,8 +163,16 @@ class PyrightService implements LanguageService {
   private versions = new Map<string, number>();
   /** Last published diagnostics per file, shown when you switch to it. */
   private published = new Map<string, Diagnostic[]>();
+  /** Installed packages' sources, by path inside site-packages, and a key for that set. */
+  private packages: Readonly<Record<string, string>> = {};
+  private packagesKey = '';
 
   constructor() {
+    this.ready = this.boot();
+  }
+
+  /** Starts basedpyright's workers; installed packages go in with its initial files. */
+  private boot(): Promise<void> {
     this.status.emit({ state: 'loading', detail: 'Loading basedpyright' });
     const started = performance.now();
     this.foreground = new Worker(PYRIGHT_URL, { name: 'basedpyright' });
@@ -181,7 +191,7 @@ class PyrightService implements LanguageService {
       if (data?.jsonrpc) this.receive(data as Rpc);
     });
     this.foreground.onerror = (event) => this.status.emit({ state: 'error', detail: event.message || 'basedpyright failed' });
-    this.ready = this.initialize().then(
+    return this.initialize().then(
       () => this.status.emit({ state: 'ready', detail: `basedpyright ready in ${Math.round(performance.now() - started)} ms` }),
       (error) => this.status.emit({ state: 'error', detail: String(error) }),
     );
@@ -258,7 +268,10 @@ class PyrightService implements LanguageService {
             pythonVersion: '3.15',
             typeCheckingMode: 'standard',
             reportMissingImports: 'warning',
+            extraPaths: [SITE_PACKAGES],
           }),
+          // Library code: read when imported, never checked or reported on.
+          ...Object.fromEntries(Object.entries(this.packages).map(([path, text]) => [`${SITE_PACKAGES}/${path}`, text])),
         },
       },
     });
@@ -313,6 +326,31 @@ class PyrightService implements LanguageService {
     this.active = path;
     const known = this.published.get(path);
     if (known) this.diagnostics.emit(-1, known);
+  }
+
+  /**
+   * basedpyright only takes file contents up front (`pyright/createFile` makes an empty
+   * file), so a new set of packages restarts it with them, then reopens our documents.
+   */
+  setPackages(files: Readonly<Record<string, string>>) {
+    const key = Object.keys(files).sort().join('\n');
+    if (key === this.packagesKey) return;
+    this.packagesKey = key;
+    this.packages = files;
+    void this.ready.then(() => {
+      const open = [...this.docs.entries()];
+      for (const worker of this.workers) worker.terminate();
+      this.workers = [];
+      for (const resolve of this.calls.values()) resolve(null);
+      this.calls.clear();
+      this.docs.clear();
+      this.versions.clear();
+      this.published.clear();
+      this.ready = this.boot();
+      void this.ready.then(() => {
+        for (const [path, doc] of open) this.put(path, doc.text);
+      });
+    });
   }
 
   setFiles(files: Readonly<Record<string, string>>) {
