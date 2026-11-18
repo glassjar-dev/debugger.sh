@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { PanelLeft } from 'lucide-react';
+import { PanelLeft, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 
 import CodeEditor from '@/components/CodeEditor';
@@ -40,6 +40,7 @@ import {
   createFolder,
   deletePath,
   entryFile,
+  isCompiledSource,
   movedPath,
   renamePath,
   starterText,
@@ -48,8 +49,21 @@ import {
 } from '@/lib/workspace/model';
 import { basename, isWithin, normalizePath } from '@/lib/workspace/paths';
 import { useWorkspace, useWorkspaceShape, workspaceStore } from '@/lib/workspace/store';
+import { fromDrop, hasFiles, readTexts, type Found } from '@/lib/workspace/readUpload';
+import { planUpload, type Skipped } from '@/lib/workspace/upload';
 
 const LANG_IDS = Object.keys(LANGS) as Lang[];
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/** "Skipped 3: a.out (not a text file), …" with the first few, for a toast. */
+function describeSkipped(skipped: readonly Skipped[]): string {
+  const shown = skipped.slice(0, 3).map((s) => `${basename(s.path)} (${s.reason})`);
+  const more = skipped.length > 3 ? `, and ${skipped.length - 3} more` : '';
+  return `Skipped ${skipped.length}: ${shown.join(', ')}${more}`;
+}
 const EXPLORER_PREF = 'glassjar.explorerOpen';
 /** Open tabs and splits per language, saved next to the workspaces. */
 const LAYOUTS_KEY = 'glassjar.layouts.v1';
@@ -276,6 +290,147 @@ export default function Page() {
     }),
     [lang, commit, open, setLayout, layouts],
   );
+
+  // The latest changeLanguage, for an Undo that runs after the language changed again.
+  const changeLanguageRef = useRef(changeLanguage);
+  changeLanguageRef.current = changeLanguage;
+
+  /** Add files from disk under `target`; see `planUpload` for where they land. */
+  const upload = useCallback(
+    async (source: Found[] | Promise<Found[]>, target: string) => {
+      let found: Found[];
+      try {
+        found = await source;
+      } catch {
+        toast.error('Couldn’t read those files');
+        return;
+      }
+      if (found.length === 0) return;
+      const { incoming, skipped: unread } = await readTexts(found);
+      const workspaces = perLang((l) => workspaceStore.get(l));
+      const plan = planUpload(workspaces, lang, incoming, target);
+      const skipped = [...unread, ...plan.skipped];
+      const changed = [...plan.added, ...plan.replaced];
+      if (changed.length === 0) {
+        if (skipped.length) toast.error('Nothing was added', { description: describeSkipped(skipped) });
+        else toast('Those files are already here');
+        return;
+      }
+
+      const into = plan.lang;
+      const langBefore = lang;
+      const before = workspaces[into];
+      const layoutBefore = layouts[into];
+      const breakpointsBefore = breakpointsByLang[into];
+      // Switch first, so telemetry sees the language change before the files it holds.
+      if (into !== lang) changeLanguage(into);
+      workspaceStore.set(into, plan.ws);
+      for (const path of changed) {
+        Telemetry.log('edit', {
+          file: path,
+          offset: 0,
+          deleted: before.files[path]?.length || undefined,
+          inserted: plan.ws.files[path] || undefined,
+          reason: 'upload',
+        });
+      }
+      // Breakpoints in a replaced file no longer point at the same code.
+      if (plan.replaced.length) {
+        const gone = new Set(plan.replaced);
+        setBreakpointsByLang((prev) => ({ ...prev, [into]: new Map([...prev[into]].filter(([p]) => !gone.has(p))) }));
+      }
+      // Show one file: the entry if it came in, else the first source file.
+      const entryPath = entryFile(into);
+      const sorted = [...changed].sort();
+      const focus = changed.includes(entryPath)
+        ? entryPath
+        : (sorted.find((p) => isCompiledSource(into, p)) ?? sorted[0]);
+      setLayouts((prev) => ({ ...prev, [into]: openFile(prev[into], focus, null) }));
+      setActiveByLang((prev) => ({ ...prev, [into]: focus }));
+      setExplorerOpen(true);
+
+      const counts = [
+        plan.added.length && `added ${plural(plan.added.length, 'file')}`,
+        plan.replaced.length && `replaced ${plural(plan.replaced.length, 'file')}`,
+      ].filter(Boolean);
+      const what = counts.join(', ');
+      const title = plan.unwrapped
+        ? `Opened ${plan.unwrapped}${into !== langBefore ? ` in ${LANGS[into].label}` : ''}: ${what}`
+        : `${what[0].toUpperCase()}${what.slice(1)}${into !== langBefore ? ` to ${LANGS[into].label}` : ''}`;
+      toast(title, {
+        description: skipped.length ? describeSkipped(skipped) : undefined,
+        // Long enough to read what was skipped, and to Undo.
+        duration: skipped.length ? 12_000 : 8_000,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            const after = workspaceStore.get(into);
+            workspaceStore.set(into, before);
+            for (const path of changed) {
+              Telemetry.log('edit', {
+                file: path,
+                offset: 0,
+                deleted: after.files[path]?.length || undefined,
+                inserted: before.files[path] || undefined,
+                reason: 'undo',
+              });
+            }
+            setLayouts((prev) => ({ ...prev, [into]: layoutBefore }));
+            setBreakpointsByLang((prev) => ({ ...prev, [into]: breakpointsBefore }));
+            if (into !== langBefore) changeLanguageRef.current(langBefore);
+          },
+        },
+      });
+    },
+    [lang, layouts, breakpointsByLang, changeLanguage],
+  );
+
+  // Files dragged in from the desktop. Drops on the Files tree go where they land (the
+  // explorer handles those); anywhere else adds them at the top level. Capturing here keeps
+  // the browser from opening a dropped file, and CodeMirror from pasting its text.
+  const [fileDrag, setFileDrag] = useState(false);
+  const uploadRef = useRef(upload);
+  uploadRef.current = upload;
+  useEffect(() => {
+    let depth = 0;
+    const reset = () => {
+      depth = 0;
+      setFileDrag(false);
+    };
+    const inTree = (e: DragEvent) => e.target instanceof Element && !!e.target.closest('.gj-tree');
+    const enter = (e: DragEvent) => {
+      if (!hasFiles(e.dataTransfer)) return;
+      depth += 1;
+      setFileDrag(true);
+    };
+    const leave = (e: DragEvent) => {
+      if (hasFiles(e.dataTransfer) && --depth <= 0) reset();
+    };
+    const over = (e: DragEvent) => {
+      if (!hasFiles(e.dataTransfer) || inTree(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer!.dropEffect = 'copy';
+    };
+    const drop = (e: DragEvent) => {
+      reset();
+      if (!hasFiles(e.dataTransfer) || inTree(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void uploadRef.current(fromDrop(e.dataTransfer!), '');
+    };
+    const listeners = [
+      ['dragenter', enter],
+      ['dragleave', leave],
+      ['dragover', over],
+      ['drop', drop],
+      ['dragend', reset],
+    ] as const;
+    for (const [type, fn] of listeners) window.addEventListener(type, fn, true);
+    return () => {
+      for (const [type, fn] of listeners) window.removeEventListener(type, fn, true);
+    };
+  }, []);
 
   const onLayoutChange = useCallback(
     (next: DockState) => {
@@ -534,7 +689,15 @@ export default function Page() {
         </div>
       </header>
       <div className="ide-body" data-explorer={explorerOpen ? 'open' : 'closed'}>
-        <Explorer lang={lang} entry={entry} activeFile={activeFile} openFiles={openSet} onOpen={open} ops={ops} />
+        <Explorer
+          lang={lang}
+          entry={entry}
+          activeFile={activeFile}
+          openFiles={openSet}
+          onOpen={open}
+          ops={ops}
+          onUpload={(source, target) => void upload(source, target)}
+        />
         <ResizableWorkspace
           key={`${lang}-${dockKey}`}
           layout={layout}
@@ -542,6 +705,15 @@ export default function Page() {
           onActivate={onActivate}
           panes={panes}
         />
+        {fileDrag && (
+          <div className="gj-drop-overlay" aria-hidden>
+            <div className="gj-drop-card">
+              <Upload size={18} />
+              <strong>Drop to add to your workspace</strong>
+              <span>Or drop on a folder in Files to put them there</span>
+            </div>
+          </div>
+        )}
       </div>
       {quickOpen && (
         <QuickOpen

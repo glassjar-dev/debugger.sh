@@ -1,6 +1,6 @@
 export const EDIT_MERGE_MS = 500;
 
-export type EditReason = 'paste' | 'undo' | 'redo' | 'language';
+export type EditReason = 'paste' | 'undo' | 'redo' | 'language' | 'upload';
 
 /** One textual change, positioned in the document produced by prior changes. */
 export type EditAtom = {

@@ -120,9 +120,10 @@ export type TelemetryDetails = {
      * - undo:			Undoing a change (e.g. with Ctrl+Z)
      * - redo:			Redoing a change (e.g. with Ctrl+Shift+Z)
      * - language:	Changing the document language (i.e. from C++ to Python)
+     * - upload:		Uploading a file from disk, which replaces the whole file
      * - undefined:	A normal keyboard edit to the document
      */
-    reason?: "paste" | "undo" | "redo" | "language";
+    reason?: "paste" | "undo" | "redo" | "language" | "upload";
     /** If the language changes, which language did it change to? */
     language?: Language;
   };
