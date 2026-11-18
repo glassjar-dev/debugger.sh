@@ -14,9 +14,12 @@ export type Workspace = {
   dirs: readonly string[];
 };
 
-export const MAX_FILES = 64;
-/** Total characters across all files, which keeps a workspace shareable. */
-export const MAX_WORKSPACE_CHARS = 100_000;
+export type WorkspaceLimits = { files: number; chars: number };
+
+/** Your own workspace, kept in this browser. Three languages' worth fit in localStorage. */
+export const LOCAL_LIMITS: WorkspaceLimits = { files: 256, chars: 500_000 };
+/** A share is stored on the server, so it stays small. */
+export const SHARE_LIMITS: WorkspaceLimits = { files: 64, chars: 100_000 };
 
 /** The file a run starts from. It can't be renamed or deleted. */
 export function entryFile(lang: Lang): string {
@@ -34,13 +37,13 @@ export function workspaceChars(ws: Workspace): number {
 }
 
 /** Validate an untrusted workspace (storage or a share). Bad paths make the whole thing invalid. */
-export function parseWorkspace(value: unknown, lang: Lang): Workspace | null {
+export function parseWorkspace(value: unknown, lang: Lang, limits: WorkspaceLimits): Workspace | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as { files?: unknown; dirs?: unknown };
   if (!record.files || typeof record.files !== 'object' || Array.isArray(record.files)) return null;
   const files: Record<string, string> = {};
   const entries = Object.entries(record.files as Record<string, unknown>);
-  if (entries.length === 0 || entries.length > MAX_FILES) return null;
+  if (entries.length === 0 || entries.length > limits.files) return null;
   for (const [raw, text] of entries) {
     const path = normalizePath(raw);
     if (!path || path !== raw || typeof text !== 'string' || Object.hasOwn(files, path)) return null;
@@ -49,7 +52,7 @@ export function parseWorkspace(value: unknown, lang: Lang): Workspace | null {
   if (!Object.hasOwn(files, entryFile(lang))) return null;
   const dirs: string[] = [];
   if (record.dirs !== undefined) {
-    if (!Array.isArray(record.dirs) || record.dirs.length > MAX_FILES) return null;
+    if (!Array.isArray(record.dirs) || record.dirs.length > limits.files) return null;
     for (const raw of record.dirs) {
       const path = typeof raw === 'string' ? normalizePath(raw) : null;
       if (!path || path !== raw || Object.hasOwn(files, path)) return null;
@@ -57,7 +60,7 @@ export function parseWorkspace(value: unknown, lang: Lang): Workspace | null {
     }
   }
   const ws = { files, dirs };
-  if (workspaceChars(ws) > MAX_WORKSPACE_CHARS) return null;
+  if (workspaceChars(ws) > limits.chars) return null;
   for (const path of Object.keys(files)) if (isFolder(ws, path)) return null;
   return ws;
 }
@@ -98,7 +101,7 @@ function checkNew(ws: Workspace, raw: string): { ok: true; path: string } | { ok
 export function createFile(ws: Workspace, raw: string, text = ''): EditResult {
   const checked = checkNew(ws, raw);
   if (!checked.ok) return checked;
-  if (Object.keys(ws.files).length >= MAX_FILES) return { ok: false, error: `At most ${MAX_FILES} files` };
+  if (Object.keys(ws.files).length >= LOCAL_LIMITS.files) return { ok: false, error: `At most ${LOCAL_LIMITS.files} files` };
   return {
     ok: true,
     ws: { files: { ...ws.files, [checked.path]: text }, dirs: ws.dirs.filter((d) => !isWithin(checked.path, d)) },

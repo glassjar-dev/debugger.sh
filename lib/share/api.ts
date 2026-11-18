@@ -1,5 +1,5 @@
 import { isShareId } from './id';
-import { MAX_SHARE_BYTES, MAX_SHARE_CODE_CHARS, parseWorkspaceState } from './state';
+import { MAX_SHARE_BYTES, MAX_SHARE_CODE_CHARS, MAX_SHARE_FILES, parseWorkspaceState } from './state';
 import type { WorkspaceState } from './types';
 
 export { parseWorkspaceState } from './state';
@@ -11,6 +11,9 @@ export async function createShare(state: WorkspaceState): Promise<string> {
   let chars = 0;
   for (const text of Object.values(state.files)) chars += text.length;
   if (chars > MAX_SHARE_CODE_CHARS) throw new ShareError('Code is too long to share');
+  // Your own workspace can hold more files than a share.
+  const count = Object.keys(state.files).length + (state.dirs?.length ?? 0);
+  if (count > MAX_SHARE_FILES) throw new ShareError(`Shares hold up to ${MAX_SHARE_FILES} files and folders`);
   const parsed = parseWorkspaceState(state);
   if (!parsed) throw new Error('Invalid workspace state');
 

@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import { ChevronRight, Copy, FilePlus2, FolderPlus, ListCollapse, Pencil, Play, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { ChevronRight, Copy, FilePlus2, FileUp, FolderPlus, FolderUp, ListCollapse, Pencil, Play, Trash2, Upload } from 'lucide-react';
 
 import type { Lang } from '@/components/constants';
 import { buildTree, type TreeNode } from '@/lib/workspace/model';
 import { basename, dirname, extname, joinPath } from '@/lib/workspace/paths';
+import { fromDrop, fromInput, hasFiles, type Found } from '@/lib/workspace/readUpload';
 import { useWorkspaceShape } from '@/lib/workspace/store';
 
 import { FileIcon, FolderIcon } from './FileIcon';
@@ -32,7 +33,11 @@ type ExplorerProps = {
   openFiles: ReadonlySet<string>;
   onOpen: (path: string) => void;
   ops: FileOps;
+  /** Add files from disk under `target` ('' for the top level). */
+  onUpload: (source: Found[] | Promise<Found[]>, target: string) => void;
 };
+
+const INTERNAL = 'application/x-glassjar-path';
 
 /** Rows in display order, for arrow-key movement. */
 function flatten(nodes: TreeNode[], collapsed: ReadonlySet<string>, out: TreeNode[] = []): TreeNode[] {
@@ -43,7 +48,7 @@ function flatten(nodes: TreeNode[], collapsed: ReadonlySet<string>, out: TreeNod
   return out;
 }
 
-export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: ExplorerProps) {
+export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops, onUpload }: ExplorerProps) {
   const shape = useWorkspaceShape(lang);
   const tree = useMemo(() => buildTree(shape.paths, shape.dirs), [shape]);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -51,7 +56,20 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
   const [editing, setEditing] = useState<Editing | null>(null);
   const [menu, setMenu] = useState<Menu | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [uploadMenu, setUploadMenu] = useState<Menu | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const filesInput = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
+  const uploadTo = useRef('');
+  const uploadButton = useRef<HTMLSpanElement>(null);
+
+  /** Open the system picker for files or a folder; what's picked goes into `target`. */
+  const pick = (kind: 'files' | 'folder', target: string) => {
+    setMenu(null);
+    setUploadMenu(null);
+    uploadTo.current = target;
+    (kind === 'files' ? filesInput : folderInput).current?.click();
+  };
 
   // Follow the editor: the focused file is the selection, and its folders open.
   useEffect(() => {
@@ -175,22 +193,32 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
                 title={node.path}
                 draggable={node.path !== entry}
                 onDragStart={(e) => {
-                  e.dataTransfer.setData('application/x-glassjar-path', node.path);
+                  e.dataTransfer.setData(INTERNAL, node.path);
                   e.dataTransfer.effectAllowed = 'move';
                 }}
                 onDragOver={(e) => {
-                  if (node.kind !== 'folder' || !e.dataTransfer.types.includes('application/x-glassjar-path')) return;
+                  // Files from the desktop land in this folder, or beside this file.
+                  const upload = hasFiles(e.dataTransfer);
+                  if (!upload && (node.kind !== 'folder' || !e.dataTransfer.types.includes(INTERNAL))) return;
                   e.preventDefault();
                   e.stopPropagation();
-                  setDropTarget(node.path);
+                  e.dataTransfer.dropEffect = upload ? 'copy' : 'move';
+                  setDropTarget(node.kind === 'folder' ? node.path : dirname(node.path));
                 }}
-                onDragLeave={() => setDropTarget((t) => (t === node.path ? null : t))}
                 onDrop={(e) => {
+                  const folder = node.kind === 'folder' ? node.path : dirname(node.path);
+                  if (hasFiles(e.dataTransfer)) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDropTarget(null);
+                    onUpload(fromDrop(e.dataTransfer), folder);
+                    return;
+                  }
                   if (node.kind !== 'folder') return;
                   e.preventDefault();
                   e.stopPropagation();
                   setDropTarget(null);
-                  const from = e.dataTransfer.getData('application/x-glassjar-path');
+                  const from = e.dataTransfer.getData(INTERNAL);
                   if (from) move(from, node.path);
                 }}
                 onClick={() => {
@@ -248,6 +276,17 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
           <IconButton label="New folder" onClick={() => startCreate('folder')}>
             <FolderPlus size={14} />
           </IconButton>
+          <span ref={uploadButton} className="gj-icon-anchor">
+            <IconButton
+              label="Upload files or a folder"
+              onClick={(e) => {
+                const box = e.currentTarget.getBoundingClientRect();
+                setUploadMenu((open) => (open ? null : { x: box.left, y: box.bottom + 4, path: null, folder: true }));
+              }}
+            >
+              <Upload size={14} />
+            </IconButton>
+          </span>
           <IconButton label="Collapse folders" onClick={() => setCollapsed(new Set(folderPaths))}>
             <ListCollapse size={14} />
           </IconButton>
@@ -261,8 +300,10 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
         data-drop={dropTarget === '' || undefined}
         onKeyDown={onKeyDown}
         onDragOver={(e) => {
-          if (!e.dataTransfer.types.includes('application/x-glassjar-path')) return;
+          const upload = hasFiles(e.dataTransfer);
+          if (!upload && !e.dataTransfer.types.includes(INTERNAL)) return;
           e.preventDefault();
+          e.dataTransfer.dropEffect = upload ? 'copy' : 'move';
           setDropTarget('');
         }}
         onDragLeave={(e) => {
@@ -270,8 +311,10 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
         }}
         onDrop={(e) => {
           e.preventDefault();
+          e.stopPropagation();
           setDropTarget(null);
-          const from = e.dataTransfer.getData('application/x-glassjar-path');
+          if (hasFiles(e.dataTransfer)) return onUpload(fromDrop(e.dataTransfer), '');
+          const from = e.dataTransfer.getData(INTERNAL);
           if (from) move(from, '');
         }}
         onContextMenu={(e) => {
@@ -300,6 +343,13 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
           </MenuItem>
           <MenuItem icon={<FolderPlus size={13} />} onClick={() => startCreate('folder', menu.path == null ? '' : menu.folder ? menu.path : dirname(menu.path))}>
             New folder
+          </MenuItem>
+          <div className="gj-menu-sep" />
+          <MenuItem icon={<FileUp size={13} />} onClick={() => pick('files', menu.path == null ? '' : menu.folder ? menu.path : dirname(menu.path))}>
+            Upload files here…
+          </MenuItem>
+          <MenuItem icon={<FolderUp size={13} />} onClick={() => pick('folder', menu.path == null ? '' : menu.folder ? menu.path : dirname(menu.path))}>
+            Upload folder here…
           </MenuItem>
           {menu.path != null && menu.path !== entry && (
             <>
@@ -343,6 +393,35 @@ export function Explorer({ lang, entry, activeFile, openFiles, onOpen, ops }: Ex
           )}
         </ContextMenu>
       )}
+      {uploadMenu && (
+        <ContextMenu menu={uploadMenu} onClose={() => setUploadMenu(null)} anchor={uploadButton}>
+          <MenuItem icon={<FileUp size={13} />} onClick={() => pick('files', targetFolder())}>
+            Upload files…
+          </MenuItem>
+          <MenuItem icon={<FolderUp size={13} />} onClick={() => pick('folder', targetFolder())}>
+            Upload folder…
+          </MenuItem>
+          <p className="gj-menu-note">Or drop them anywhere</p>
+        </ContextMenu>
+      )}
+      {(['files', 'folder'] as const).map((kind) => (
+        <input
+          key={kind}
+          ref={(el) => {
+            (kind === 'files' ? filesInput : folderInput).current = el;
+            // Not in React's types: lets the picker choose a whole folder.
+            if (el && kind === 'folder') el.setAttribute('webkitdirectory', '');
+          }}
+          type="file"
+          multiple
+          hidden
+          onChange={(e) => {
+            const list = e.currentTarget.files;
+            if (list?.length) onUpload(fromInput(list), uploadTo.current);
+            e.currentTarget.value = '';
+          }}
+        />
+      ))}
     </aside>
   );
 }
@@ -419,7 +498,15 @@ function NameInput({
   );
 }
 
-function IconButton({ label, onClick, children }: { label: string; onClick: () => void; children: ReactNode }) {
+function IconButton({
+  label,
+  onClick,
+  children,
+}: {
+  label: string;
+  onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+  children: ReactNode;
+}) {
   return (
     <button type="button" className="gj-icon-btn" aria-label={label} title={label} onClick={onClick}>
       {children}
@@ -427,11 +514,23 @@ function IconButton({ label, onClick, children }: { label: string; onClick: () =
   );
 }
 
-function ContextMenu({ menu, onClose, children }: { menu: Menu; onClose: () => void; children: ReactNode }) {
+function ContextMenu({
+  menu,
+  onClose,
+  anchor,
+  children,
+}: {
+  menu: Menu;
+  onClose: () => void;
+  /** The button that opened the menu: it toggles the menu itself, so pressing it isn't "outside". */
+  anchor?: RefObject<HTMLElement | null>;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const close = (e: Event) => {
-      if (!ref.current?.contains(e.target as Node)) onClose();
+      const target = e.target as Node;
+      if (!ref.current?.contains(target) && !anchor?.current?.contains(target)) onClose();
     };
     const esc = (e: globalThis.KeyboardEvent) => e.key === 'Escape' && onClose();
     window.addEventListener('pointerdown', close, true);
@@ -442,7 +541,7 @@ function ContextMenu({ menu, onClose, children }: { menu: Menu; onClose: () => v
       window.removeEventListener('keydown', esc);
       window.removeEventListener('blur', onClose);
     };
-  }, [onClose]);
+  }, [onClose, anchor]);
   // Keep the menu on screen near the pointer.
   const style = {
     left: Math.min(menu.x, window.innerWidth - 200),

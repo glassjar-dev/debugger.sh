@@ -13,7 +13,7 @@ import { useSyncExternalStore } from 'react';
 
 import { LANGS, type Lang } from '@/components/constants';
 
-import { defaultWorkspace, parseWorkspace, type Workspace } from './model';
+import { defaultWorkspace, LOCAL_LIMITS, parseWorkspace, type Workspace } from './model';
 
 export type WorkspaceShape = { paths: readonly string[]; dirs: readonly string[] };
 
@@ -24,7 +24,7 @@ const LANG_IDS = Object.keys(LANGS) as Lang[];
 function load(lang: Lang): Workspace {
   try {
     const raw = localStorage.getItem(STORAGE_PREFIX + lang);
-    if (raw) return parseWorkspace(JSON.parse(raw), lang) ?? defaultWorkspace(lang);
+    if (raw) return parseWorkspace(JSON.parse(raw), lang, LOCAL_LIMITS) ?? defaultWorkspace(lang);
   } catch {
     // Storage blocked or corrupt: start fresh.
   }
