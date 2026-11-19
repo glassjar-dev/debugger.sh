@@ -100,6 +100,48 @@ function isCppSource(path: string): boolean {
 
 const display = (path: string) => `/${path}`;
 
+/** Where `python -m` and `python -c` start: a small script the run gets but the workspace doesn't. */
+const LAUNCHER = '__glassjar_main__.py';
+/** The code of `python -c`, as a file so its imports count when installing packages. */
+const INLINE_CODE = '__glassjar_c__.py';
+
+/**
+ * Starts a module (`-m`) or inline code (`-c`) the way Python's own flags do: imports
+ * resolve from the current folder, and tracebacks start at the user's code.
+ */
+function launcher(flag: '-m' | '-c', value: string): string {
+  const lines = [
+    'import os, sys, traceback',
+    'sys.path[0] = os.getcwd()',
+    'try:',
+  ];
+  if (flag === '-m') {
+    const top = value.split('.')[0]!;
+    lines.push(
+      '    import runpy',
+      `    runpy.run_module(${JSON.stringify(value)}, run_name="__main__", alter_sys=True)`,
+    );
+    // Lets the package installer see the module, e.g. `python -m pytest`.
+    lines.unshift('if False:', `    import ${top}`);
+  } else {
+    lines.push(
+      "    sys.argv[0] = '-c'",
+      `    with open(${JSON.stringify(`/${INLINE_CODE}`)}) as f:`,
+      "        code = compile(f.read(), '<string>', 'exec')",
+      "    exec(code, {'__name__': '__main__', '__builtins__': __builtins__})",
+    );
+  }
+  lines.push(
+    'except SystemExit:',
+    '    raise',
+    'except BaseException as e:',
+    '    traceback.print_exception(type(e), e, e.__traceback__.tb_next)',
+    '    sys.exit(1)',
+    '',
+  );
+  return lines.join('\n');
+}
+
 export class Shell {
   readonly history: string[] = [];
   private cwds: Record<Lang, string> = { c: '', python: '', rust: '' };
@@ -724,10 +766,24 @@ export class Shell {
       io.out.write('Python 3 (glassjar, WebAssembly)\n');
       return Promise.resolve({ code: 0 });
     }
+    if (script === '-m' || script === '-c') {
+      const value = args[i + 1];
+      if (value === undefined) {
+        io.err(`Argument expected for the ${script} option\n`);
+        return Promise.resolve({ code: 2 });
+      }
+      if (script === '-m' && !/^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$/.test(value)) {
+        io.err(`${name}: No module named ${value}\n`);
+        return Promise.resolve({ code: 1 });
+      }
+      const files: Record<string, string> = { ...this.ws.files, [LAUNCHER]: launcher(script, value) };
+      if (script === '-c') files[INLINE_CODE] = value;
+      return this.job({ ...base, files, entry: display(LAUNCHER), args: args.slice(i + 2) }, io);
+    }
     if (script === undefined || script.startsWith('-')) {
       io.err(
         script
-          ? `${name}: ${script} isn’t supported here; run a file, like ${name} main.py\n`
+          ? `${name}: ${script} isn’t supported here; run a file (${name} main.py) or a module (${name} -m unittest)\n`
           : `${name}: the interactive prompt isn’t available yet; run a file, like ${name} main.py\n`,
       );
       return Promise.resolve({ code: 2 });
@@ -923,7 +979,10 @@ export class Shell {
     const lang = this.lang;
     const entry = entryFile(lang);
     const rows: [string, string][] = [[`run [args]`, `run ${entry}, like the Run button`]];
-    if (lang === 'python') rows.push(['python file.py [args]', 'run a Python file']);
+    if (lang === 'python') {
+      rows.push(['python file.py [args]', 'run a Python file']);
+      rows.push(['python -m unittest', 'run a module (pytest too); -c "code" runs code']);
+    }
     if (lang === 'c') rows.push(['g++ *.cpp -o app', 'compile; then ./app [args] runs it']);
     if (lang === 'rust') {
       rows.push(['rustc main.rs', 'compile; then ./main [args] runs it']);

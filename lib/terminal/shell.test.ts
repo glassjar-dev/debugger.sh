@@ -151,3 +151,25 @@ test('tab completes commands and paths', async () => {
   assert.deepEqual(s.sh.complete('cat data/n'), { insert: '', options: ['names.txt', 'numbers.txt'] });
   assert.deepEqual(s.sh.complete('cat data/nu'), { insert: 'mbers.txt ', options: [] });
 });
+
+test('python -m and -c start from a launcher the workspace never sees', async () => {
+  const s = shell({ 'main.py': '', 'tests/test_a.py': '' });
+  await s.$('cd tests && python3 -m unittest -v');
+  const module = s.jobs[0]!;
+  assert.equal(module.entry, '/__glassjar_main__.py');
+  assert.deepEqual(module.args, ['-v']);
+  assert.equal(module.cwd, '/tests');
+  const launcher = module.files['__glassjar_main__.py']!;
+  assert.match(launcher, /runpy\.run_module\("unittest", run_name="__main__", alter_sys=True\)/);
+  assert.match(launcher, /^if False:\n {4}import unittest$/m);
+  assert.ok(!('__glassjar_main__.py' in s.ws().files));
+
+  await s.$(`python -c 'import sys; print(sys.argv)' a b`);
+  const inline = s.jobs[1]!;
+  assert.equal(inline.files['__glassjar_c__.py'], 'import sys; print(sys.argv)');
+  assert.deepEqual(inline.args, ['a', 'b']);
+
+  assert.equal((await s.$('python -m')).code, 2);
+  assert.equal((await s.$('python -m "os; x"')).code, 1);
+  assert.equal(s.jobs.length, 2);
+});
