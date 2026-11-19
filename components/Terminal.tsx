@@ -1,19 +1,9 @@
 'use client';
 
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
-import { SquareTerminal } from 'lucide-react';
+import { useEffect, useRef } from 'react';
 import '@xterm/xterm/css/xterm.css';
 
-import { EmptyState } from './EmptyState';
-
-export type TerminalHandle = {
-  write: (data: string | Uint8Array) => void;
-  writeln: (data: string) => void;
-  clear: () => void;
-  focus: () => void;
-  /** Register a stdin handler. Returns a dispose fn. Replaces any prior handler. */
-  onData: (handler: (data: string) => void) => () => void;
-};
+import type { TerminalLink } from '@/lib/terminal/session';
 
 // Matches --gj-panel so the terminal sits flush in its card.
 const xtermTheme = {
@@ -39,47 +29,16 @@ const xtermTheme = {
   brightWhite: '#fff',
 };
 
-const Terminal = forwardRef<TerminalHandle>((_props, ref) => {
+/** The xterm view of a terminal session. The session keeps the screen, so remounts are harmless. */
+function Terminal({ link }: { link: TerminalLink }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const termRef = useRef<import('@xterm/xterm').Terminal | null>(null);
-  const fitRef = useRef<import('@xterm/addon-fit').FitAddon | null>(null);
-  const dataDisposerRef = useRef<{ dispose: () => void } | null>(null);
-  // Show a hint until the program prints something.
-  const [hasOutput, setHasOutput] = useState(false);
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      write: (d) => {
-        if (d.length) setHasOutput(true);
-        termRef.current?.write(d);
-      },
-      writeln: (d) => {
-        setHasOutput(true);
-        termRef.current?.writeln(d);
-      },
-      // xterm queues write() but runs clear() at once, so output still waiting in the
-      // queue would survive the clear and show up again in the redraw that follows.
-      // Clearing through the same queue (home, erase screen, erase scrollback) keeps order.
-      clear: () => termRef.current?.write('\x1b[H\x1b[2J\x1b[3J'),
-      focus: () => termRef.current?.focus(),
-      onData: (handler) => {
-        dataDisposerRef.current?.dispose();
-        const d = termRef.current?.onData(handler) ?? null;
-        dataDisposerRef.current = d;
-        return () => {
-          d?.dispose();
-          if (dataDisposerRef.current === d) dataDisposerRef.current = null;
-        };
-      },
-    }),
-    [],
-  );
 
   // Dynamic import — xterm touches `self`, which breaks SSR.
   useEffect(() => {
     let disposed = false;
     let resizeObserver: ResizeObserver | null = null;
+    let unbind = () => {};
+    let xterm: import('@xterm/xterm').Terminal | null = null;
 
     void (async () => {
       const [{ Terminal: XTerm }, { FitAddon }] = await Promise.all([
@@ -101,12 +60,14 @@ const Terminal = forwardRef<TerminalHandle>((_props, ref) => {
       term.loadAddon(fit);
       term.open(containerRef.current);
       fit.fit();
-
-      termRef.current = term;
-      fitRef.current = fit;
+      link.size = { cols: term.cols, rows: term.rows };
+      term.onResize(({ cols, rows }) => (link.size = { cols, rows }));
+      term.onData((data) => link.onInput(data));
+      unbind = link.bind({ write: (data) => term.write(data), focus: () => term.focus() });
+      xterm = term;
 
       resizeObserver = new ResizeObserver(() => {
-        requestAnimationFrame(() => fitRef.current?.fit());
+        requestAnimationFrame(() => !disposed && fit.fit());
       });
       resizeObserver.observe(containerRef.current);
     })();
@@ -114,13 +75,10 @@ const Terminal = forwardRef<TerminalHandle>((_props, ref) => {
     return () => {
       disposed = true;
       resizeObserver?.disconnect();
-      dataDisposerRef.current?.dispose();
-      dataDisposerRef.current = null;
-      termRef.current?.dispose();
-      termRef.current = null;
-      fitRef.current = null;
+      unbind();
+      xterm?.dispose();
     };
-  }, []);
+  }, [link]);
 
   return (
     <div className="ide-terminal-wrap">
@@ -137,16 +95,8 @@ const Terminal = forwardRef<TerminalHandle>((_props, ref) => {
           overflow: 'hidden',
         }}
       />
-      {!hasOutput && (
-        <div className="ide-terminal-hint">
-          <EmptyState icon={<SquareTerminal size={18} />} title="Program output">
-            What your program prints shows up here. When it asks for input, click here and type.
-          </EmptyState>
-        </div>
-      )}
     </div>
   );
-});
+}
 
-Terminal.displayName = 'Terminal';
 export default Terminal;

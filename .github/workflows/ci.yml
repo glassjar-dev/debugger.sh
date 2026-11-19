@@ -23,6 +23,9 @@ jobs:
       - name: Typecheck app and Worker
         run: npm run typecheck
 
+      - name: Unit tests
+        run: npm test
+
       # Bundles worker/index.ts without uploading; fails on bad bindings or imports.
       - name: Bundle Worker
         run: mkdir -p out && npx wrangler deploy --dry-run --outdir dist-worker

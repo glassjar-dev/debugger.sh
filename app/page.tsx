@@ -10,7 +10,7 @@ import { LanguageSelect } from '@/components/LanguageSelect';
 import ResizableWorkspace from '@/components/ResizableWorkspace';
 import { ShareButton } from '@/components/ShareButton';
 import { RunStopButton } from '@/components/SourceActions';
-import Terminal, { type TerminalHandle } from '@/components/Terminal';
+import Terminal from '@/components/Terminal';
 import { TestsPanel } from '@/components/TestsPanel';
 import { VariablesPanel } from '@/components/VariablesPanel';
 import { Explorer, type FileOps } from '@/components/files/Explorer';
@@ -28,6 +28,7 @@ import {
   type PaneId,
 } from '@/components/dock/types';
 import { useExecution, type Breakpoints } from '@/hooks/useExecution';
+import { TerminalSession } from '@/lib/terminal/session';
 import { getLanguageService } from '@/lib/intellisense/services';
 import { runnerReady } from '@/lib/intellisense/runnerReady';
 import { pathsToDirNode } from '@/lib/stanford/fsTree';
@@ -120,10 +121,10 @@ export default function Page() {
   const persistLayoutsRef = useRef(false);
   const [explorerOpen, setExplorerOpen] = useState(true);
   const [quickOpen, setQuickOpen] = useState(false);
-  const terminalRef = useRef<TerminalHandle | null>(null);
-  // Stable element identity so the xterm instance is not remounted on each IDE render.
-  const terminal = useMemo(() => <Terminal ref={terminalRef} />, []);
-  const exec = useExecution({ terminalRef });
+  // One terminal session for the page; the xterm view binds to it (and can remount).
+  const [session] = useState(() => new TerminalSession());
+  const terminal = useMemo(() => <Terminal link={session.link} />, [session]);
+  const exec = useExecution({ console: session });
 
   // Warm the engine for whichever language is on screen, starting with the default.
   const { warm } = exec;
@@ -461,11 +462,37 @@ export default function Page() {
     [setLayout],
   );
 
+  // The shell works on this language's workspace and runs programs through the engine.
+  const execRun = exec.run;
+  useEffect(() =>
+    session.bind({
+      lang: () => lang,
+      workspace: () => workspaceStore.get(lang),
+      setWorkspace: (next) => workspaceStore.set(lang, next),
+      run: (job) =>
+        execRun(job.files, job.build ? new Map() : breakpointsRef.current, lang, {
+          args: job.args,
+          cwd: job.cwd,
+          entry: job.entry,
+          build: job.build,
+          stdin: job.stdin,
+          capture: job.capture,
+          timing: job.project,
+        }),
+      open: (path) => {
+        open(path);
+        return true;
+      },
+    }),
+  );
+
   const debugging = LANGS[lang].debug && [...breakpoints.values()].some((lines) => lines.size > 0);
+  // Run types `run` at the terminal's prompt, so it shows like any other command.
   const runCode = useCallback(() => {
     reveal('output');
-    void exec.run(workspaceStore.get(lang).files, breakpointsRef.current, lang);
-  }, [reveal, exec, lang]);
+    session.focus();
+    session.runProject();
+  }, [reveal, session]);
 
   // Show the pane that has news: tests once a run reports some, variables when paused.
   const hasTests = (exec.testState?.tests.length ?? 0) > 0;

@@ -11,7 +11,8 @@ import type {
   ScopeView,
   StackFrame,
 } from '@/components/dap-types';
-import type { TerminalHandle } from '@/components/Terminal';
+import type { ExecConsole } from '@/lib/terminal/session';
+import type { ShellJobResult } from '@/lib/terminal/shell';
 import { toDebugFrame } from '@/lib/telemetry/map';
 import { Telemetry } from '@/lib/telemetry/client';
 import type { TestCase } from '@/lib/telemetry/types';
@@ -90,8 +91,29 @@ function testsFrom(decoder: { state: TestRunState } | null): TestCase[] | undefi
 }
 
 export type UseExecutionOptions = {
-  terminalRef: React.RefObject<TerminalHandle | null>;
+  /** The terminal: program output goes to it, and it sends the program's input. */
+  console: ExecConsole;
 };
+
+/** How a run starts, beyond the files: what a shell command line sets. */
+export type RunOptions = {
+  /** Arguments after the program's name. */
+  args?: string[];
+  /** Absolute folder to start in. */
+  cwd?: string;
+  /** Python script or Rust crate root, absolute. */
+  entry?: string;
+  /** Compile without running (C/C++ and Rust). */
+  build?: boolean;
+  /** Input from `< file`; the program sees end-of-file after it. */
+  stdin?: string;
+  /** Collect stdout into the result instead of showing it (`> file`). */
+  capture?: boolean;
+  /** Show how long the run took afterwards. */
+  timing?: boolean;
+};
+
+export type RunOutcome = ShellJobResult;
 
 export type ExecutionApi = {
   isRunning: boolean;
@@ -107,8 +129,9 @@ export type ExecutionApi = {
   run: (
     files: Readonly<Record<string, string>>,
     breakpoints: Breakpoints,
-    lang: Lang
-  ) => Promise<void>;
+    lang: Lang,
+    options?: RunOptions
+  ) => Promise<RunOutcome>;
   stop: () => void;
   resume: () => void;
   stepOver: () => void;
@@ -123,9 +146,7 @@ export type ExecutionApi = {
   warm: (lang: Lang) => void;
 };
 
-export function useExecution({
-  terminalRef,
-}: UseExecutionOptions): ExecutionApi {
+export function useExecution({ console: term }: UseExecutionOptions): ExecutionApi {
   const [isRunning, setIsRunning] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [stopped, setStopped] = useState<StopLocation | null>(null);
@@ -145,7 +166,6 @@ export function useExecution({
   const isRunningRef = useRef(false);
   const dapSeqRef = useRef(1);
   const ioCleanupRef = useRef<(() => void) | null>(null);
-  const stdinDisposeRef = useRef<(() => void) | null>(null);
   const breakpointsRef = useRef<Breakpoints>(new Map());
   /** Files the engine last heard breakpoints for, so removing a file's last one clears it. */
   const sentBreakpointFilesRef = useRef<Set<string>>(new Set());
@@ -154,7 +174,8 @@ export function useExecution({
   const langRef = useRef<Lang>('c');
   const testDecoderRef = useRef<ReturnType<typeof createTestReportDecoder> | null>(null);
   const testStateRafRef = useRef<number | null>(null);
-  const stdoutBufferRef = useRef('');
+  /** Stdout collected for `> file`, or null when it shows in the terminal. */
+  const capturedRef = useRef<string | null>(null);
   /** Bumped on each `stopped` (and when auto-skipping library stops) so twin refreshes stay coherent. */
   const debugRefreshGenRef = useRef(0);
   const stopReasonRef = useRef<StopReason>('pause');
@@ -169,11 +190,9 @@ export function useExecution({
           : status.kind === 'installing'
             ? `\x1b[3;90m${status.message}…\x1b[0m\r\n`
             : '';
-      if (!line) return;
-      stdoutBufferRef.current += line;
-      terminalRef.current?.write(line);
+      if (line) term.output(line);
     },
-    [terminalRef]
+    [term]
   );
   const notePackageRef = useRef(notePackage);
   notePackageRef.current = notePackage;
@@ -355,20 +374,16 @@ export function useExecution({
   const teardown = useCallback(() => {
     ioCleanupRef.current?.();
     ioCleanupRef.current = null;
-    stdinDisposeRef.current?.();
-    stdinDisposeRef.current = null;
+    term.attach(null);
     runtimeRef.current = null;
     isRunningRef.current = false;
     testDecoderRef.current = null;
-  }, []);
+  }, [term]);
 
   const wireStdout = useCallback(
     (rt: Engine) => {
       const stdoutDecoder = new TextDecoder();
       const stderrDecoder = new TextDecoder();
-      // Buffer program output and flush via terminalRef on each chunk. Reading
-      // the ref at write-time avoids a stale xterm handle if React remounts the
-      // terminal while the run is in flight.
       const onData = (kind: 'stdout' | 'stderr', decoder: TextDecoder) => (chunk: Uint8Array) => {
         const text = decoder.decode(chunk);
         const filtered = testDecoderRef.current
@@ -376,10 +391,8 @@ export function useExecution({
           : text;
         if (filtered) {
           Telemetry.log('run_io', { kind, data: filtered });
-          // Keep a durable copy — xterm can remount when the Tests panel
-          // updates, which would otherwise drop live writes.
-          stdoutBufferRef.current += filtered.replace(/\r?\n/g, '\r\n');
-          terminalRef.current?.write(filtered.replace(/\r?\n/g, '\r\n'));
+          if (kind === 'stdout' && capturedRef.current !== null) capturedRef.current += filtered;
+          else term.output(filtered);
         }
         if (testDecoderRef.current) {
           if (testStateRafRef.current == null) {
@@ -404,58 +417,37 @@ export function useExecution({
         rt.stderr.off('data', onStderr);
       };
     },
-    [terminalRef]
+    [term]
   );
 
+  const stopRef = useRef<() => void>(() => undefined);
+
+  /** The terminal's typing goes to the program (unless its input is a file). */
   const wireStdin = useCallback(
-    (rt: Engine) => {
-      const term = terminalRef.current;
-      if (!term) return;
-      const encoder = new TextEncoder();
-      let buffer = '';
-      stdinDisposeRef.current = term.onData((data) => {
-        if (!isRunningRef.current) return;
-        Telemetry.log('run_io', { kind: 'stdin', data });
-        if (data === '\x03') {
-          term.write('^C\r\n');
-          rt.stop();
-          return;
-        }
-        if (data === '\x04') {
-          term.write('^D\r\n');
-          void rt.stdin.write(encoder.encode('\x04'));
-          buffer = '';
-          return;
-        }
-        if (data === '\x0c') {
-          term.clear();
-          buffer = '';
-          return;
-        }
-        if (data === '\r') {
-          term.write('\r\n');
-          void rt.stdin.write(encoder.encode(`${buffer}\n`));
-          buffer = '';
-          return;
-        }
-        if (data === '\u007f') {
-          if (buffer.length > 0) {
-            buffer = buffer.slice(0, -1);
-            term.write('\b \b');
-          }
-          return;
-        }
-        if (data.startsWith('\x1b')) return;
-        buffer += data;
-        term.write(data);
+    (rt: Engine, fromFile: boolean) => {
+      term.attach({
+        write: (text) => {
+          Telemetry.log('run_io', { kind: 'stdin', data: text });
+          if (!fromFile) void rt.stdin.write(text);
+        },
+        end: () => void (!fromFile && rt.stdin.end()),
+        stop: () => stopRef.current(),
       });
     },
-    [terminalRef]
+    [term]
   );
 
   const run = useCallback(
-    async (files: Readonly<Record<string, string>>, breakpoints: Breakpoints, lang: Lang) => {
-      if (isRunningRef.current) return;
+    async (
+      files: Readonly<Record<string, string>>,
+      breakpoints: Breakpoints,
+      lang: Lang,
+      options: RunOptions = {}
+    ): Promise<RunOutcome> => {
+      if (isRunningRef.current) {
+        term.output('glassjar: a program is already running\n');
+        return { exitCode: 1 };
+      }
       Telemetry.log('run_start');
       let finish: {
         reason: 'completed' | 'error' | 'stopped';
@@ -463,27 +455,27 @@ export function useExecution({
         build_ms?: number;
         run_ms?: number;
       } = { reason: 'error' };
+      let outcome: RunOutcome = { exitCode: 1 };
       const started = performance.now();
       langRef.current = lang;
       breakpointsRef.current = breakpoints;
       sentBreakpointFilesRef.current = new Set();
       userFilesRef.current = new Set(Object.keys(files));
       // Prefer a fast non-debug build when nothing needs DWARF / instrumentation.
-      const wantsDebug = LANGS[lang].debug && [...breakpoints.values()].some((lines) => lines.size > 0);
+      const wantsDebug =
+        !options.build && LANGS[lang].debug && [...breakpoints.values()].some((lines) => lines.size > 0);
       teardown();
       clearDebug();
       setTestState(null);
-      stdoutBufferRef.current = '';
+      capturedRef.current = options.capture ? '' : null;
       setIsRunning(true);
       isRunningRef.current = true;
-      terminalRef.current?.clear();
-      terminalRef.current?.focus();
 
       try {
         if (typeof window !== 'undefined' && !window.crossOriginIsolated) {
-          terminalRef.current?.writeln(
-            '\r\n[ide warning] SharedArrayBuffer is unavailable (crossOriginIsolated=false). ' +
-              'Run via `npm run dev` — not a static export preview.'
+          term.output(
+            '[ide warning] SharedArrayBuffer is unavailable (crossOriginIsolated=false). ' +
+              'Run via `npm run dev` — not a static export preview.\n'
           );
         }
 
@@ -503,8 +495,22 @@ export function useExecution({
         dapSeqRef.current = 1;
 
         wireStdout(rt);
-        wireStdin(rt);
+        wireStdin(rt, options.stdin !== undefined);
         rt.debugger.enabled = wantsDebug;
+        const { cols, rows } = term.size();
+        rt.program = {
+          args: options.args ?? [],
+          ...(options.cwd ? { cwd: options.cwd } : {}),
+          ...(options.entry ? { entry: options.entry } : {}),
+          env: {
+            TERM: 'xterm-256color',
+            COLUMNS: String(cols),
+            LINES: String(rows),
+            // Python buffers stdout unless it's a terminal; this one is, as far as you can tell.
+            ...(lang === 'python' ? { PYTHONUNBUFFERED: '1' } : {}),
+          },
+          collectFiles: !options.build,
+        };
 
         if (lang === 'c') {
           const prepared = prepareCppRun(files, LANGS[lang].fsKey);
@@ -515,10 +521,8 @@ export function useExecution({
           );
           rt.binaryFiles = { ...stanford.binaryFiles };
           rt.cppArtifacts = { ...stanford.cppArtifacts, sources: prepared.sources };
-          if (prepared.hasTests) {
+          if (prepared.hasTests && !options.build) {
             testDecoderRef.current = createTestReportDecoder(prepared.nonce);
-            // Defer React state updates until after the engine is wired so a
-            // re-render cannot remount the terminal mid-setup.
           }
         } else {
           rt.fs = pathsToDirNode({ ...files });
@@ -553,8 +557,12 @@ export function useExecution({
           rt.debugger.on('event', onDebuggerEvent);
         }
 
-        const runPromise = rt.run();
+        const runPromise = options.build ? rt.compile() : rt.run();
         priorRunRef.current = runPromise;
+        if (options.stdin !== undefined) {
+          void rt.stdin.write(options.stdin);
+          void rt.stdin.end();
+        }
         let runSettled = false;
         void runPromise.finally(() => {
           runSettled = true;
@@ -584,16 +592,20 @@ export function useExecution({
             build_ms: Math.round(result.timing.buildMs),
             run_ms: Math.round(result.timing.runMs),
           };
+          outcome = { exitCode: result.exitCode, ...(result.files ? { files: result.files } : {}) };
         } else if (result.type === 'stopped') {
           finish = { reason: 'stopped' };
+          outcome = { exitCode: 130, stopped: true };
         } else {
           finish = { reason: 'error' };
+          term.output(`\x1b[31m${result.error.type}: ${result.error.message}\x1b[0m\n`);
         }
         if (testDecoderRef.current) {
           const rest = testDecoderRef.current.finish();
           if (rest) {
             Telemetry.log('run_io', { kind: 'stdout', data: rest });
-            stdoutBufferRef.current += rest.replace(/\r?\n/g, '\r\n');
+            if (capturedRef.current !== null) capturedRef.current += rest;
+            else term.output(rest);
           }
           const nextState = {
             ...testDecoderRef.current.state,
@@ -614,9 +626,6 @@ export function useExecution({
           }
           setTestState(nextState);
         }
-        if (result.type === 'error') {
-          stdoutBufferRef.current += `\r\n[ide error] ${result.error.type}: ${result.error.message}\r\n`;
-        }
         if (typeof window !== 'undefined') {
           const timing =
             result.type === 'completed'
@@ -635,7 +644,7 @@ export function useExecution({
           };
         }
       } catch (err) {
-        stdoutBufferRef.current += `\r\n[ide error] ${err instanceof Error ? err.message : String(err)}\r\n`;
+        term.output(`\x1b[31m${err instanceof Error ? err.message : String(err)}\x1b[0m\n`);
         if (testDecoderRef.current) {
           setTestState({
             ...testDecoderRef.current.state,
@@ -661,18 +670,18 @@ export function useExecution({
           ...finish,
           ...(tests && tests.length ? { tests } : {}),
         });
-        const ms = Math.round(performance.now() - started);
-        const term = terminalRef.current;
-        if (term) {
-          term.clear();
-          if (stdoutBufferRef.current) term.write(stdoutBufferRef.current);
-          term.writeln(`\r\n\x1b[3;90mRan in ${ms}ms\x1b[0m`);
-        }
+        if (capturedRef.current !== null) outcome = { ...outcome, stdout: capturedRef.current };
+        capturedRef.current = null;
         teardown();
         clearDebug();
         setIsRunning(false);
         markRunnerReady(lang);
+        if (options.timing) {
+          const ms = Math.round(performance.now() - started);
+          term.output(`\x1b[3;90mRan in ${ms}ms\x1b[0m\n`);
+        }
       }
+      return outcome;
     },
     [
       clearDebug,
@@ -681,7 +690,7 @@ export function useExecution({
       getEngine,
       scheduleDebugRefresh,
       teardown,
-      terminalRef,
+      term,
       wireStdin,
       wireStdout,
     ]
@@ -693,6 +702,7 @@ export function useExecution({
     clearDebug();
     setIsRunning(false);
   }, [clearDebug, teardown]);
+  stopRef.current = stop;
 
   const resume = useCallback(() => {
     if (!isRunningRef.current) return;
